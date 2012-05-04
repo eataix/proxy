@@ -1,12 +1,12 @@
 #flags
 CC = gcc
 CFLAGS = -Wall
-LDFLAGS = -lldap -s
+LDFLAGS = -s
 
 #targets
 all: webproxy
 
-webproxy: webproxy.o
+webproxy: webproxy.o config.o
 	$(LD) $(LDFLAGS) -o $@ $<
 
 webproxy.o: webproxy.c
