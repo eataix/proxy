@@ -7,10 +7,10 @@ LDFLAGS = -s
 all: webproxy
 
 webproxy: webproxy.o config.o
-	$(LD) $(LDFLAGS) -o $@ $<
+	$(CC) $(CFLAGS) -o $@ $^
 
 webproxy.o: webproxy.c
-	$(CC) $(CFLAGS) -c $ config.c
+	$(CC) $(CFLAGS) -c $ webproxy.c
 
 tester: tester.o config.o
 	$(CC) $(CFLAGS) -o $@ tester.o config.o
