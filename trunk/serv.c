@@ -34,6 +34,7 @@
 #include <unistd.h>
 #include <signal.h>
 #include <fcntl.h>
+#include <ctype.h>
 
 #include "dbg.h"
 #include "readline.h"
@@ -124,12 +125,41 @@ error:
         return NULL;
 }
 
+int
+process(char *str, const int str_len) {
+
+        const char *prefix = "http://";
+        int length = strlen(prefix);
+
+        char *p = malloc(str_len + 1);
+        memset(p, 0, sizeof(*p));
+        memcpy(p, str, str_len);
+
+
+        int i, j;
+        for (i = 0, j = 0; i < str_len && j < str_len; i++, j++) {
+                if (strncasecmp(p + j, prefix, length - 1) == 0) {
+                        for (j += length; ;j++) {
+                                if (p[j] == '/'){
+                                        break;
+                                }
+                                if (p[j] == ' ') {
+                                        str[i++] = '/';
+                                        break;
+                                }
+                        }
+                }
+                str[i] = p[j];
+        }
+
+        return i;
+}
+
         void
 proxy(int sfd)
 {
         int             byte_count = 0;
         char           *hostname = NULL;
-        char                ch;
 
         signal(SIGTERM, childSigHandler);
 
@@ -147,12 +177,15 @@ proxy(int sfd)
                         "Cannot allocate memory for buffer");
 
         fd_set          master,
-                        read_fds;
+                        read_fds,
+                        write_fds;
 
         int             fdmax;
+        int line_count = 0;
 
         FD_ZERO(&master);
         FD_ZERO(&read_fds);
+        FD_ZERO(&write_fds);
 
         FD_SET(sfd, &master);
         client->socketfd = sfd;
@@ -162,12 +195,17 @@ proxy(int sfd)
         for (;;) {
                 byte_count = readLine(client->socketfd, client->buffer + client->bytes_read,
                                 500);
+                line_count++;
+
+                if (line_count == 1) {
+                        byte_count = process(client->buffer + client->bytes_read, byte_count);
+                }
+
                 if (strncmp(client->buffer + client->bytes_read, "Host: ", 6) ==0) {
                         printf("host");
                         hostname = extract_header(client->buffer + client->bytes_read, "Host: ");
                         serveri->socketfd = make_socket(hostname, "http");
-                        fcntl(sfd, F_SETFL, O_NONBLOCK);
-                        FD_SET(serveri->socketfd, &master);
+                        //fcntl(sfd, F_SETFL, O_NONBLOCK);
                 }
                 client->bytes_read += byte_count;
                 if (byte_count == 2) {
@@ -186,14 +224,15 @@ proxy(int sfd)
                 client->socketfd ? serveri->socketfd : client->socketfd;
 
         struct timeval tv;
-        tv.tv_sec = 5;
-        tv.tv_usec = 0;
+        tv.tv_sec = 0;
+        tv.tv_usec = 5000000;
 
         client->bytes_read = 0;
         serveri->bytes_read = 0;
 
         for (;;) {
                 read_fds = master;
+
                 if (select(fdmax + 1, &read_fds, NULL, NULL, &tv) == -1) {
                         printf("cannot select \n");
                         _exit(1);
@@ -202,13 +241,18 @@ proxy(int sfd)
                 if (FD_ISSET(client->socketfd, &read_fds)) {
                         //printf("read line from client\n");
                         byte_count =
-                                recv(client->socketfd, client->buffer + client->bytes_read, 1, 0);
+                                recv(client->socketfd, client->buffer + client->bytes_read, 1024, 0);
 
                         if (byte_count == -1) {
                                 _exit(1);
                         }
 
-                        client->bytes_read++;
+                        int i;
+                        for (i = 0; i < byte_count; i++) {
+                                putchar((client->buffer + client ->bytes_read)[i]);
+                        }
+
+                        client->bytes_read += byte_count;
 
                         byte_count = send(serveri->socketfd, client->buffer, client->bytes_read, 0);
 
@@ -221,18 +265,16 @@ proxy(int sfd)
                         continue;
                 }
 
-                if (FD_ISSET(serveri->socketfd, &read_fds)) {
+                if (serveri->socketfd != -1 && FD_ISSET(serveri->socketfd, &read_fds)) {
                         byte_count =
-                                recv(serveri->socketfd, serveri->buffer + serveri->bytes_read, 1, 0);
+                                recv(serveri->socketfd, serveri->buffer + serveri->bytes_read, 1024, 0);
 
                         if (byte_count == -1) {
                                 _exit(1);
                         }
 
-                        serveri->bytes_read++;
+                        serveri->bytes_read+= byte_count;
 
-                        if (serveri->bytes_read < 5)
-                                continue;
 
                         byte_count = send(client->socketfd, serveri->buffer, serveri->bytes_read, 0);
 
@@ -252,6 +294,8 @@ proxy(int sfd)
                         send(serveri->socketfd, client->buffer, client->bytes_read, 0);
 
                 printf("finish\n");
+                free(serveri->buffer);
+                free(client->buffer);
                 close(serveri->socketfd);
                 close(client->socketfd);
                 _exit(0);
@@ -284,7 +328,7 @@ main()
         hints.ai_socktype = SOCK_STREAM;
         hints.ai_flags = AI_PASSIVE;
 
-        check(getaddrinfo(NULL, "3310", &hints, &servinfo) == 0,
+        check(getaddrinfo(NULL, "8080", &hints, &servinfo) == 0,
                         "cannot getaddrinfo");
 
         sfd =

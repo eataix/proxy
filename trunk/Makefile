@@ -1,4 +1,4 @@
 CC=clang
-CFLAGS=-g -Wall
+CFLAGS=-g -Wall -O2
 main:
-	clang -Wall -Wextra -g serv.c readline.c -o serv
+	clang ${CFLAGS} serv.c readline.c -o serv
