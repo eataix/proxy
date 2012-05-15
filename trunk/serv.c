@@ -37,7 +37,7 @@
 #include "dbg.h"
 #include "readline.h"
 
-#define BUFFER_SIZE INT32_MAX
+#define BUFFER_SIZE INT16_MAX
 
 void
 sigHandler(int sig)
@@ -61,17 +61,25 @@ childSigHandler(int sig)
     }
 }
 
-int
-myatoi(const void *buffer, const int length)
+char           *
+extract_header(const char *line, const char *key)
 {
-    int             result;
-    char           *tmp = malloc(length + 1);
-    memset(tmp, 0, length + 1);
-    memcpy(tmp, buffer, length);
-    // printf("the string is: %s", tmp);
-    result = atoi(tmp);
-    free(tmp);
-    return result;
+    int             length;
+    char           *header = NULL;
+    int             prefixLength;
+
+    prefixLength = strlen(key);
+
+    length = strcspn(line, "\r\n") - prefixLength;
+
+    header = malloc(length + 1);
+    check(header != NULL, "Cannot allocate memory to extra");
+    *header = '\0';
+    strncat(header, line + prefixLength, length);
+    return header;
+
+  error:
+    return NULL;
 }
 
 void
@@ -86,17 +94,14 @@ proxy(int sfd)
     char           *startOfRead = buffer;
     char           *ptr;
     int             content_length = 0;
-
     struct timeval  tv;
     fd_set          readfds;
 
     signal(SIGTERM, childSigHandler);
 
-    /*
-     * A full domain name is limited to 255 octets (including the separators).
-     */
     check((buffer =
-           malloc(BUFFER_SIZE)) != NULL, "Cannot allocate memory");
+           malloc(BUFFER_SIZE)) != NULL,
+          "Cannot allocate memory for buffer");
 
     for (;;) {
         startOfRead = buffer + total_byte_read;
@@ -113,33 +118,16 @@ proxy(int sfd)
             break;
         }
 
-        if ((ptr =
-             strnstr(startOfRead, "Content-Length: ",
-                     byte_count)) != NULL) {
-            int             end =
-                strcspn(ptr, "\r\n") - strlen("Content-Length: ");
-            // content_length = myatoi(ptr, end);
-            content_length = myatoi(ptr + strlen("Content-Length: "), end);
-            // printf("Content length: %d", content_length);
-        }
-
-        if ((ptr = strnstr(startOfRead, "Host: ", byte_count)) != NULL) {
-            int             length = strcspn(ptr, "\r\n") - 6;
-            hostname = malloc(length + 1);
-            *hostname = '\0';
-            strncat(hostname, startOfRead + 6, length);
-            // printf("Host is: %d", (host - buffer));
-        }
     }
 
-    // buffer[total_byte_read] = '\0';
+    if ((ptr = strnstr(buffer, "Content-Length: ",
+                       total_byte_read)) != NULL) {
+        content_length = atoi(extract_header(ptr, "Content-Length: "));
+    }
 
-    tv.tv_sec = 1;
-    tv.tv_usec = 0;
-    // printf("%s", buffer);
-    FD_ZERO(&readfds);
-    FD_SET(sfd, &readfds);
-    select(sfd + 1, &readfds, NULL, NULL, &tv);
+    if ((ptr = strnstr(buffer, "Host: ", total_byte_read)) != NULL) {
+        hostname = extract_header(ptr, "Host: ");
+    }
 
     int             i;
     for (i = 0; i < content_length; i++) {
@@ -152,7 +140,6 @@ proxy(int sfd)
     memset(&hints, 0, sizeof(hints));
     hints.ai_family = AF_INET;
     hints.ai_socktype = SOCK_STREAM;
-
 
     if (getaddrinfo(hostname, "http", &hints, &server) == 0) {
         printf("resolved\n");
@@ -201,23 +188,7 @@ proxy(int sfd)
             if (byte_count == 2)
                 break;
 
-            if ((ptr =
-                 strnstr(startOfRead, "Content-Length: ",
-                         byte_count)) != NULL) {
-                int             end =
-                    strcspn(ptr, "\r\n") - strlen("Content-Length: ");
-                content_length =
-                    myatoi(ptr + strlen("Content-Length: "), end);
-                // printf("Content length: %d", content_length);
-                // printf("test if this line has been excuted");
-            }
-
-            if (strstr(startOfRead, "Transfer-Encoding: chunked\r\n") !=
-                NULL) {
-                printf("***************chunked*********\n");
-                chunk = 1;
-            }
-        }
+       }
     } else {
         printf("timeout\n");
         close(serversocket);
@@ -225,12 +196,20 @@ proxy(int sfd)
         _exit(1);
     }
 
+    if ((ptr = strnstr(buffer, "Content-Length: ", total_byte_read)) != NULL) {
+            content_length = atoi(extract_header(ptr, "Content-Length: "));
+    }
+
+    if (strnstr(buffer, "Transfer-Encoding: chunked\r\n", total_byte_read) !=
+                    NULL) {
+            printf("***************chunked*********\n");
+            chunk = 1;
+    }
+
     printf("%s", buffer);
-    printf("217", buffer);
 
     FD_ZERO(&readfds);
     FD_SET(serversocket, &readfds);
-    printf("here", buffer);
     if (content_length != 0) {
         tv.tv_sec = 3;
         select(serversocket + 1, &readfds, NULL, NULL, &tv);
@@ -257,7 +236,7 @@ proxy(int sfd)
 
             if (byte_count == 2 && startOfRead[0] == '\r'
                 && startOfRead[1] == '\n') {
-                    printf("break\n");
+                printf("break\n");
                 break;
             }
         }
