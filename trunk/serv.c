@@ -278,7 +278,14 @@ proxy(int sfd)
     FD_ZERO(&master);
     FD_SET(serveri->socketfd, &master);
     fdmax = serveri->socketfd;
+
+    struct timeval  prev;
+    time_t          second;
+    suseconds_t     usecond;
+
     for (;;) {
+        gettimeofday(&prev, NULL);
+
         read_fds = master;
 
         if (select(fdmax + 1, &read_fds, NULL, NULL, &tv) == -1) {
@@ -291,7 +298,7 @@ proxy(int sfd)
             tv.tv_sec = 1;
             byte_count =
                 recv(serveri->socketfd,
-                     serveri->buffer + serveri->bytes_read, 1024, 0);
+                     serveri->buffer + serveri->bytes_read, 4096, 0);
 
             // printf("read: %d bytes", byte_count);
 
@@ -310,7 +317,15 @@ proxy(int sfd)
             }
 
             serveri->bytes_read = 0;
+            second = prev.tv_sec;
+            usecond = prev.tv_usec;
+            gettimeofday(&prev, NULL);
 
+            // usleep(byte_count / 1024 / 200 * 1000000 - (prev.tv_sec -
+            // second) * 1000000 - (prev.tv_usec - usecond));
+            usleep(1000000 / 1024 / 100 * byte_count -
+                   (prev.tv_sec - second) * 1000000 - (prev.tv_usec -
+                                                       usecond));
             continue;
         }
 

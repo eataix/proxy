@@ -32,45 +32,45 @@
 
 #include "readline.h"
 
-        ssize_t
+ssize_t
 readLine(int sfd, void *buffer, size_t n)
 {
-        ssize_t         numRead;
-        size_t          totRead;
-        char           *buf;
-        char            ch;
+    ssize_t         numRead;
+    size_t          totRead;
+    char           *buf;
+    char            ch;
 
-        if (n <= 0 || buffer == NULL) {
-                errno = EINVAL;
+    if (n <= 0 || buffer == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    buf = buffer;
+
+    totRead = 0;
+
+    for (;;) {
+
+        numRead = recv(sfd, &ch, 1, 0);
+
+        if (numRead == -1) {
+            if (errno == EINTR)
+                continue;
+            else
                 return -1;
+        } else if (numRead == 0) {
+            if (totRead == 0)
+                return 0;
+            else
+                break;
+        } else {
+            if (totRead < n) {
+                totRead++;
+                *buf++ = ch;
+            }
+            if (ch == '\n')
+                break;
         }
-
-        buf = buffer;
-
-        totRead = 0;
-
-        for (;;) {
-
-                numRead = recv(sfd, &ch, 1, 0);
-
-                if (numRead == -1) {
-                        if (errno == EINTR)
-                                continue;
-                        else
-                                return -1;
-                } else if (numRead == 0) {
-                        if (totRead == 0)
-                                return 0;
-                        else
-                                break;
-                } else {
-                        if (totRead < n) {
-                                totRead++;
-                                *buf++ = ch;
-                        }
-                        if (ch == '\n')
-                                break;
-                }
-        }
-        return totRead;
+    }
+    return totRead;
 }
