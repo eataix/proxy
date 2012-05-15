@@ -27,16 +27,24 @@
 #include <unistd.h>
 #include <errno.h>
 #include <stdio.h>
+#include <sys/types.h>
+#include <sys/socket.h>
 
 #include "readline.h"
 
-ssize_t
-readLine(int fd, void *buffer, size_t n)
+        ssize_t
+readLine(int sfd, void *buffer, size_t n)
 {
-        ssize_t numRead;
-        size_t totRead;
-        char *buf;
-        char ch;
+        ssize_t         numRead;
+        size_t          totRead;
+        char           *buf;
+        char            ch;
+
+        struct timeval  tv;
+        fd_set          readfds;
+
+        tv.tv_sec = 0;
+        tv.tv_usec = 50000000;
 
         if (n <= 0 || buffer == NULL) {
                 errno = EINVAL;
@@ -47,29 +55,37 @@ readLine(int fd, void *buffer, size_t n)
 
         totRead = 0;
 
-        for (;;) {
-                numRead = read(fd, &ch, 1);
-                //write(1, &ch, 1);
+        //FD_ZERO(&readfds);
+        //FD_SET(sfd, &readfds);
+        //select(sfd + 1, &readfds, NULL, NULL, &tv);
 
-                if (numRead == -1) {
-                        if (errno == EINTR)
-                                continue;
-                        else
-                                return -1;
-                } else if (numRead == 0) {
-                        if (totRead == 0)
-                                return 0;
-                        else
-                                break;
-                } else {
-                        if (totRead < n - 1) {
-                                totRead++;
-                                *buf++ = ch;
+        //if (FD_ISSET(sfd, &readfds)) {
+                for (;;) {
+                        numRead = recv(sfd, &ch, 1, 0);
+                        // write(1, &ch, 1);
+
+                        if (numRead == -1) {
+                                if (errno == EINTR)
+                                        continue;
+                                else
+                                        return -1;
+                        } else if (numRead == 0) {
+                                if (totRead == 0)
+                                        return 0;
+                                else
+                                        break;
+                        } else {
+                                if (totRead < n - 1) {
+                                        totRead++;
+                                        *buf++ = ch;
+                                }
+                                if (ch == '\n')
+                                        break;
                         }
-                        if (ch == '\n')
-                                break;
                 }
-        }
-        *buf = '\0';
-        return totRead;
+                *buf = '\0';
+                return totRead;
+        //} else {
+        //        return -1;
+        //}
 }
