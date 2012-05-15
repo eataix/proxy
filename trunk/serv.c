@@ -39,6 +39,14 @@
 
 #define BUFFER_SIZE INT16_MAX
 
+struct peer {
+    int             socketfd;
+    int             flag;
+    char           *buffer;
+    int             bytes_read;
+    char           *current;
+};
+
 void
 sigHandler(int sig)
 {
@@ -59,6 +67,40 @@ childSigHandler(int sig)
         printf("%d is going to terminate\n", getpid());
         _exit(0);
     }
+}
+
+int
+make_socket(const char *name, const char *port)
+{
+    struct addrinfo hints,
+                   *ai,
+                   *p;
+    int             s;
+    printf("prepare to connect to %s\n", name);
+
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    if (name == NULL) {
+        hints.ai_flags = AI_PASSIVE;
+    }
+
+    if (getaddrinfo(name, port, &hints, &ai) != 0) {
+        printf("Cannot getaddrinfo");
+        _exit(1);
+    }
+
+    for (p = ai; p != NULL; p = p->ai_next) {
+        s = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
+        if (s < 0)
+            continue;
+        printf("created a file discriptor\n");
+        if (connect(s, p->ai_addr, p->ai_addrlen) != 0)
+            continue;
+        printf("Connected\n");
+        return s;
+    }
+    return -1;
 }
 
 char           *
@@ -86,191 +128,133 @@ void
 proxy(int sfd)
 {
     int             byte_count = 0;
-    char           *buffer = NULL;
     char           *hostname = NULL;
-    struct addrinfo hints,
-                   *server;
-    int             total_byte_read = 0;
-    char           *startOfRead = buffer;
-    char           *ptr;
-    int             content_length = 0;
-    struct timeval  tv;
-    fd_set          readfds;
+    char                ch;
 
     signal(SIGTERM, childSigHandler);
 
-    check((buffer =
-           malloc(BUFFER_SIZE)) != NULL,
+    struct peer    *client = malloc(sizeof(*client));
+    struct peer    *serveri = malloc(sizeof(*serveri));
+
+    memset(client, 0, sizeof(*client));
+    memset(serveri, 0, sizeof(*serveri));
+
+    serveri->socketfd = -1;
+
+    check((client->buffer = malloc(BUFFER_SIZE)) != NULL,
+          "Cannot allocate memory for buffer");
+    check((serveri->buffer = malloc(BUFFER_SIZE)) != NULL,
           "Cannot allocate memory for buffer");
 
-    for (;;) {
-        startOfRead = buffer + total_byte_read;
-        byte_count =
-            readLine(sfd, buffer + total_byte_read, BUFFER_SIZE - 1);
+    fd_set          master,
+                    read_fds;
 
-        if (byte_count == -1) {
+    int             fdmax;
+
+    FD_ZERO(&master);
+    FD_ZERO(&read_fds);
+
+    FD_SET(sfd, &master);
+    client->socketfd = sfd;
+    fdmax = sfd;
+
+    struct timeval tv;
+    tv.tv_sec = 10;
+    tv.tv_usec = 0;
+
+    for (;;) {
+        read_fds = master;
+        fdmax =
+                serveri->socketfd >
+                client->socketfd ? serveri->socketfd : client->socketfd;
+
+        //printf("select\n");
+        if (select(fdmax + 1, &read_fds, NULL, NULL, &tv) == -1) {
+            printf("cannot select \n");
             _exit(1);
         }
 
-        total_byte_read += byte_count;
-
-        if (byte_count == 2) {
-            break;
-        }
-
-    }
-
-    if ((ptr = strnstr(buffer, "Content-Length: ",
-                       total_byte_read)) != NULL) {
-        content_length = atoi(extract_header(ptr, "Content-Length: "));
-    }
-
-    if ((ptr = strnstr(buffer, "Host: ", total_byte_read)) != NULL) {
-        hostname = extract_header(ptr, "Host: ");
-    }
-
-    int             i;
-    for (i = 0; i < content_length; i++) {
-        recv(sfd, buffer + total_byte_read + i, 1, 0);
-        total_byte_read++;
-    }
-
-    printf("Will now connect to %s\n", hostname);
-
-    memset(&hints, 0, sizeof(hints));
-    hints.ai_family = AF_INET;
-    hints.ai_socktype = SOCK_STREAM;
-
-    if (getaddrinfo(hostname, "http", &hints, &server) == 0) {
-        printf("resolved\n");
-    }
-
-    int             serversocket =
-        socket(server->ai_family, server->ai_socktype,
-               server->ai_protocol);
-
-    if (serversocket != -1) {
-        printf("Created a new file descriptor\n");
-    }
-
-    if (connect(serversocket, server->ai_addr, server->ai_addrlen)
-        == 0) {
-        printf("Connected.\n");
-    }
-
-    send(serversocket, buffer, total_byte_read, 0);
-
-
-    FD_ZERO(&readfds);
-    FD_SET(serversocket, &readfds);
-
-    tv.tv_sec = 5;
-    tv.tv_usec = 0;
-
-    select(serversocket + 1, &readfds, NULL, NULL, &tv);
-
-    int             chunk = 0;
-
-    total_byte_read = 0;
-    content_length = 0;
-    memset(buffer, 0, total_byte_read);
-    if (FD_ISSET(serversocket, &readfds)) {
-        for (;;) {
-            startOfRead = buffer + total_byte_read;
+        if (FD_ISSET(client->socketfd, &read_fds)) {
+            //printf("read line from client\n");
             byte_count =
-                readLine(serversocket, buffer + total_byte_read,
-                         BUFFER_SIZE);
-            if (byte_count == -1)
+                readLine(client->socketfd,
+                         client->buffer + client->bytes_read,
+                         500 , &ch);
+
+            if (byte_count <= 0) {
                 _exit(1);
-
-            total_byte_read += byte_count;
-
-            if (byte_count == 2)
-                break;
-
-       }
-    } else {
-        printf("timeout\n");
-        close(serversocket);
-        close(sfd);
-        _exit(1);
-    }
-
-    if ((ptr = strnstr(buffer, "Content-Length: ", total_byte_read)) != NULL) {
-            content_length = atoi(extract_header(ptr, "Content-Length: "));
-    }
-
-    if (strnstr(buffer, "Transfer-Encoding: chunked\r\n", total_byte_read) !=
-                    NULL) {
-            printf("***************chunked*********\n");
-            chunk = 1;
-    }
-
-    printf("%s", buffer);
-
-    FD_ZERO(&readfds);
-    FD_SET(serversocket, &readfds);
-    if (content_length != 0) {
-        tv.tv_sec = 3;
-        select(serversocket + 1, &readfds, NULL, NULL, &tv);
-        if (FD_ISSET(serversocket, &readfds)) {
-            for (i = 0; i < content_length; i++) {
-                recv(serversocket, buffer + total_byte_read, 1, 0);
-                total_byte_read++;
             }
-        } else {
-            printf("timeout\n");
-        }
-    }
 
-    if (chunk) {
-        for (;;) {
-            startOfRead = buffer + total_byte_read;
+            if (strncmp(client->buffer + client->bytes_read, "Host: ", 6) ==0) {
+                    printf("host");
+                    hostname = extract_header(client->buffer + client->bytes_read, "Host: ");
+                    serveri->socketfd = make_socket(hostname, "http");
+                    FD_SET(serveri->socketfd, &master);
+            }
+            client->bytes_read += byte_count;
+
+            //printf("socket fd: %d\n", serveri->socketfd);
+            if (serveri->socketfd != -1) {
+                int byte_sent = send(serveri->socketfd, client->buffer, client->bytes_read > byte_count ? client->bytes_read : byte_count,0 );
+                //printf("byte_sent: %d\n", byte_sent);
+                client->bytes_read = 0;
+            }
+
+            if (ch){
+                    printf("eof of client\n");
+                    FD_CLR(client->socketfd, &master);
+            }
+
+            continue;
+        }
+
+        if (serveri->socketfd != -1 && FD_ISSET(serveri->socketfd, &read_fds)) {
+            //printf("read line from server\n");
             byte_count =
-                readLine(serversocket, buffer + total_byte_read,
-                         BUFFER_SIZE);
-            if (byte_count == -1)
+                readLine(serveri->socketfd,
+                         serveri->buffer,
+                         500,
+                         &ch);
+            if (byte_count <= 0) {
                 _exit(1);
-
-            total_byte_read += byte_count;
-
-            if (byte_count == 2 && startOfRead[0] == '\r'
-                && startOfRead[1] == '\n') {
-                printf("break\n");
-                break;
             }
+            serveri->buffer[byte_count] = '\0';
+            printf("%s", serveri->buffer);
+
+            send(client->socketfd, serveri->buffer, byte_count, 0);
+
+            if (ch){
+                    printf("eof\n");
+                FD_CLR(serveri->socketfd, &master);
+                FD_CLR(client->socketfd, &master);
+            }
+
+            continue;
         }
+
+        printf("finish\n");
+        close(serveri->socketfd);
+        close(client->socketfd);
+        _exit(0);
+
+        //printf("select\n");
     }
-
-
-    printf("About to send %d bytes of data.\n", total_byte_read);
-
-    fd_set          writefds;
-    FD_ZERO(&writefds);
-    FD_SET(sfd, &writefds);
-    select(sfd + 1, NULL, &writefds, NULL, NULL);
-    int             byte_sent;
-    printf("About to send %d bytes of data.\n", total_byte_read);
-    byte_sent = send(sfd, buffer, total_byte_read, 0);
-    printf("%d bytes have been sent.", byte_sent);
-    close(sfd);
-    _exit(0);
 
   error:
-    close(sfd);
+    close(serveri->socketfd);
+    close(client->socketfd);
     _exit(1);
 }
 
 int
-main(int argc, char *argv[])
+main()
 {
     int             sfd,
                     newfd;
     struct addrinfo hints,
                    *servinfo;
-    struct sockaddr_in their_addr;
-    socklen_t       addr_size;
     int             optval;
+    //setbuf(stdout, NULL);
 
     signal(SIGCHLD, SIG_IGN);
     signal(SIGINT, sigHandler);
@@ -281,7 +265,7 @@ main(int argc, char *argv[])
     hints.ai_socktype = SOCK_STREAM;
     hints.ai_flags = AI_PASSIVE;
 
-    check(getaddrinfo(NULL, "80", &hints, &servinfo) == 0,
+    check(getaddrinfo(NULL, "3310", &hints, &servinfo) == 0,
           "cannot getaddrinfo");
 
     sfd =
@@ -297,17 +281,16 @@ main(int argc, char *argv[])
     check(listen(sfd, 10) != -1, "Cannot listen");
 
     while (1) {
-        addr_size = sizeof(their_addr);
-        // check((newfd = accept(sfd, (struct sockaddr *) &their_addr,
-        // &addr_size)) != -1, "cannot accept");
         check((newfd = accept(sfd, NULL, NULL)) != -1, "cannot accept");
 
         switch (fork()) {
         case 0:
+            //printf("fork");
             proxy(newfd);
             break;
         default:
             close(newfd);
+            continue;
         }
         // printf("finish");
     }

@@ -33,18 +33,12 @@
 #include "readline.h"
 
         ssize_t
-readLine(int sfd, void *buffer, size_t n)
+readLine(int sfd, void *buffer, size_t n, char *eof)
 {
         ssize_t         numRead;
         size_t          totRead;
         char           *buf;
         char            ch;
-
-        struct timeval  tv;
-        fd_set          readfds;
-
-        tv.tv_sec = 0;
-        tv.tv_usec = 50000000;
 
         if (n <= 0 || buffer == NULL) {
                 errno = EINVAL;
@@ -54,15 +48,22 @@ readLine(int sfd, void *buffer, size_t n)
         buf = buffer;
 
         totRead = 0;
+        fd_set readfds;
 
-        //FD_ZERO(&readfds);
-        //FD_SET(sfd, &readfds);
-        //select(sfd + 1, &readfds, NULL, NULL, &tv);
+        *eof = 0;
 
-        //if (FD_ISSET(sfd, &readfds)) {
-                for (;;) {
+        struct timeval tv;
+        tv.tv_sec = 2;
+        tv.tv_usec = 0;
+        FD_ZERO(&readfds);
+
+        for (;;) {
+                FD_SET(sfd, &readfds);
+                select(sfd + 1, &readfds, NULL, NULL, &tv);
+
+                if (FD_ISSET(sfd, &readfds)) {
                         numRead = recv(sfd, &ch, 1, 0);
-                        // write(1, &ch, 1);
+                        //write(1, &ch, 1);
 
                         if (numRead == -1) {
                                 if (errno == EINTR)
@@ -75,17 +76,18 @@ readLine(int sfd, void *buffer, size_t n)
                                 else
                                         break;
                         } else {
-                                if (totRead < n - 1) {
+                                if (totRead < n) {
                                         totRead++;
                                         *buf++ = ch;
                                 }
                                 if (ch == '\n')
                                         break;
                         }
+                } else {
+                        *eof = 1;
+                        return totRead;
                 }
-                *buf = '\0';
-                return totRead;
-        //} else {
-        //        return -1;
-        //}
+        }
+        return totRead;
+        //return -1;
 }

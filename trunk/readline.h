@@ -30,5 +30,5 @@
 #include <unistd.h>
 #include <errno.h>
 
-ssize_t         readLine(int fd, void *buffer, size_t n);
+ssize_t         readLine(int fd, void *buffer, size_t n, char *eof);
 #endif                          /* READLINE_H_ */
