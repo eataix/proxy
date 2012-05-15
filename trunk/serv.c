@@ -30,13 +30,19 @@
 #include <netdb.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/time.h>
+#include <unistd.h>
 
 #include "dbg.h"
 #include "readline.h"
 
-void copybytes(char *s1, const char *s2, const int num) {
-        char *p1 = s1;
-        const char *p2 = s2;
+#define BUFFER_SIZE INT16_MAX
+
+        void
+copybytes(char *s1, const char *s2, const int num)
+{
+        char           *p1 = s1;
+        const char     *p2 = s2;
         while (*p2 != '\0') {
                 memcpy(s1, s2, 1);
         }
@@ -45,21 +51,21 @@ void copybytes(char *s1, const char *s2, const int num) {
         int
 main(int argc, char *argv[])
 {
-        int             sfd, newfd, newfd2;
+        int             sfd,
+                        newfd,
+                        newfd2;
         struct addrinfo hints,
                         *servinfo;
         struct sockaddr_in their_addr;
         socklen_t       addr_size;
-        char            *buffer;
+        char           *buffer;
         int             byte_count;
         char            reply[100];
-        char            *header[20];
-        int index = 0;
-        char *host = NULL;
-        int optval;
-        int optlen;
-        char *optval2;
-        int length;
+        int             index = 0;
+        char           *host = NULL;
+        int             optval;
+        int             optlen;
+        char           *optval2;
 
         memset(&hints, 0, sizeof(hints));
         hints.ai_family = AF_INET;
@@ -73,65 +79,100 @@ main(int argc, char *argv[])
                 socket(servinfo->ai_family, servinfo->ai_socktype,
                                 servinfo->ai_protocol);
 
+        optval = 1;
+        setsockopt(sfd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval));
+
         check(bind(sfd, servinfo->ai_addr, servinfo->ai_addrlen) != -1,
                         "cannot bind.");
 
         check(listen(sfd, 10) != -1, "Cannot listen");
 
-        optval = 1;
-        setsockopt(sfd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval));
-
-
-        int server = -1;
-        struct addrinfo *serveraddrinfo;
 
         host = malloc(100);
-connect:
-        memset(host, 0, strlen(host));
-        addr_size = sizeof(their_addr);
-        check((newfd = accept(sfd, (struct sockaddr *)&their_addr, &addr_size)) != -1, "cannot accept");
 
-        while ((byte_count = readLine(newfd, reply, 100)) != -1) {
-                if (strstr(reply, "Host: ") != NULL) {
-                        char *ptr = reply + strlen("Host: ");
-                        while (*ptr != '\r') {
-                                strncat(host, ptr, 1);
-                                ptr++;
+        while (1) {
+                memset(host, 0, strlen(host));
+                addr_size = sizeof(their_addr);
+                check((newfd =
+                                        accept(sfd, (struct sockaddr *) &their_addr,
+                                                &addr_size)) != -1, "cannot accept");
+
+                if (fork() == 0) {
+                        buffer = malloc(BUFFER_SIZE);
+                        byte_count = recv(newfd, buffer, BUFFER_SIZE - 1, 0);
+                        buffer[byte_count] = '\0';
+
+                        printf("%s", buffer);
+
+                        if ((host = strcasestr(buffer, "Host: ")) == NULL) {
+                                return EXIT_FAILURE;
                         }
-                        strncat(host, "\0", 1);
-                        printf("%s %d\n", host, strlen(host));
+                        //printf("Host is: %d", (host - buffer));
 
-                        printf("prepare to resolve");
+                        int             length = strcspn(host, "\r\n") - 6;
+                        char           *hostname = malloc(length + 1);
+                        *hostname = '\0';
+                        strncat(hostname, host + 6, length);
+
+                        printf("Will now connect to %s\n", hostname);
+
                         memset(&hints, 0, sizeof(hints));
                         hints.ai_family = AF_INET;
-                        hints.ai_socktype =  SOCK_STREAM;
-                        if (getaddrinfo(host, "http", &hints, &serveraddrinfo) == 0){
-                                printf("resolved");
+                        hints.ai_socktype = SOCK_STREAM;
+
+
+                        struct addrinfo *server;
+                        if (getaddrinfo(hostname, "http", &hints, &server) == 0) {
+                                //printf("resolved\n");
                         }
-                        server = socket(serveraddrinfo->ai_family, serveraddrinfo->ai_socktype,
-                                        serveraddrinfo->ai_protocol);
-                        if (server != -1) {
-                                printf("created socket");
+
+                        int             serversocket =
+                                socket(server->ai_family, server->ai_socktype,
+                                                server->ai_protocol);
+
+                        if (serversocket != -1) {
+                                //printf("Created a new file descriptor\n");
                         }
-                        if (connect(server, serveraddrinfo->ai_addr, serveraddrinfo->ai_addrlen) == 0) {
-                                printf("connected");
-                                write(server, buffer, strlen(buffer));
+
+                        if (connect(serversocket, server->ai_addr, server->ai_addrlen)
+                                        == 0) {
+                                //printf("Connected.\n");
                         }
+
+                        send(serversocket, buffer, byte_count, 0);
+
+                        struct timeval tv;
+                        fd_set readfds;
+
+                        tv.tv_sec = 1;
+                        tv.tv_usec = 0;
+                        int total_bytes = 0;
+
+                        while (1) {
+                                FD_ZERO(&readfds);
+                                FD_SET(serversocket, &readfds);
+                                select(serversocket + 1, &readfds, NULL, NULL, &tv);
+
+                                if (FD_ISSET(serversocket, &readfds)) {
+                                        byte_count = recv(serversocket, buffer + total_bytes, BUFFER_SIZE, 0);
+                                        if (byte_count == 0)
+                                                break;
+                                        else if (byte_count == -1)
+                                                break;
+                                        total_bytes += byte_count;
+                                } else {
+                                        break;
+                                }
+                        }
+
+                        //printf("About to send.\n");
+                        send(newfd, buffer, total_bytes, 0);
+                        close(newfd);
+                        exit(0);
                 }
-                if (server != -1) {
-                        write(server, reply, strlen(reply));
-                }
-                buffer = strdup(reply);
-                if (byte_count == 2) {
-                        int count;
-                        char ch;
-                        while ((count = read(server, &ch, 1)) != 0 && count != -1) {
-                                write(newfd, &ch, 1);
-                        }
-                        break;
-                }
+                close(newfd);
+                //printf("finish");
         }
-        goto connect;
 
         return EXIT_SUCCESS;
 
