@@ -62,9 +62,6 @@ readLine(int fd, void *buffer, size_t n)
                         else
                                 break;
                 } else {
-                        if (ch == '\r') {
-                                continue;
-                        }
                         if (totRead < n - 1) {
                                 totRead++;
                                 *buf++ = ch;
