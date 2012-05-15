@@ -33,7 +33,7 @@
 #include "readline.h"
 
         ssize_t
-readLine(int sfd, void *buffer, size_t n, char *eof)
+readLine(int sfd, void *buffer, size_t n)
 {
         ssize_t         numRead;
         size_t          totRead;
@@ -48,46 +48,29 @@ readLine(int sfd, void *buffer, size_t n, char *eof)
         buf = buffer;
 
         totRead = 0;
-        fd_set readfds;
-
-        *eof = 0;
-
-        struct timeval tv;
-        tv.tv_sec = 2;
-        tv.tv_usec = 0;
-        FD_ZERO(&readfds);
 
         for (;;) {
-                FD_SET(sfd, &readfds);
-                select(sfd + 1, &readfds, NULL, NULL, &tv);
 
-                if (FD_ISSET(sfd, &readfds)) {
-                        numRead = recv(sfd, &ch, 1, 0);
-                        //write(1, &ch, 1);
+                numRead = recv(sfd, &ch, 1, 0);
 
-                        if (numRead == -1) {
-                                if (errno == EINTR)
-                                        continue;
-                                else
-                                        return -1;
-                        } else if (numRead == 0) {
-                                if (totRead == 0)
-                                        return 0;
-                                else
-                                        break;
-                        } else {
-                                if (totRead < n) {
-                                        totRead++;
-                                        *buf++ = ch;
-                                }
-                                if (ch == '\n')
-                                        break;
-                        }
+                if (numRead == -1) {
+                        if (errno == EINTR)
+                                continue;
+                        else
+                                return -1;
+                } else if (numRead == 0) {
+                        if (totRead == 0)
+                                return 0;
+                        else
+                                break;
                 } else {
-                        *eof = 1;
-                        return totRead;
+                        if (totRead < n) {
+                                totRead++;
+                                *buf++ = ch;
+                        }
+                        if (ch == '\n')
+                                break;
                 }
         }
         return totRead;
-        //return -1;
 }
