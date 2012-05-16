@@ -288,7 +288,7 @@ proxy(int sfd)
     struct timeval  prev;
     time_t          second;
     suseconds_t     usecond;
-    int count;
+    int             count;
 
     for (;;) {
         gettimeofday(&prev, NULL);
@@ -305,7 +305,8 @@ proxy(int sfd)
             tv.tv_sec = 1;
             byte_count =
                 recv(serveri->socketfd,
-                     serveri->buffer + serveri->bytes_read, KBYTES_TO_BYTES(RATE_LIMIT) * 20, 0);
+                     serveri->buffer + serveri->bytes_read,
+                     KBYTES_TO_BYTES(RATE_LIMIT) * 20, 0);
 
             // printf("read: %d bytes", byte_count);
 
@@ -328,16 +329,17 @@ proxy(int sfd)
             usecond = prev.tv_usec;
             gettimeofday(&prev, NULL);
 
-            //count = (useconds_t) ((long)1000000 * (byte_count / 1024) / 3000)  -
-            //       (prev.tv_sec - second) * 1000000 - (prev.tv_usec -
-            //                                           usecond);
+            // count = (useconds_t) ((long)1000000 * (byte_count / 1024) / 
+            // 3000) -
+            // (prev.tv_sec - second) * 1000000 - (prev.tv_usec -
+            // usecond);
 
-            count = (useconds_t) (FACTOR * BYTES_TO_KBYTES(byte_count))  -
-                   ((useconds_t) (prev.tv_sec - second)) * USECOND_PER_SECOND - (prev.tv_usec -
-                                                       usecond);
+            count = (useconds_t) (FACTOR * BYTES_TO_KBYTES(byte_count)) -
+                ((useconds_t) (prev.tv_sec - second)) *
+                USECOND_PER_SECOND - (prev.tv_usec - usecond);
 
             if (count >= 0)
-            usleep(count);
+                usleep(count);
 
             continue;
         }
