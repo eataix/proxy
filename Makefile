@@ -1,11 +1,11 @@
 #flags
 CC = clang
-CFLAGS = -Wall -O2 -g
+CFLAGS = -Wall -O2 -g -Wextra
 
 #targets
 all: webproxy
 
-webproxy: webproxy.o config.o readline.o
+webproxy: webproxy.o config.o readline.o utils.o
 	$(CC) $(CFLAGS) -o $@ $^
 
 webproxy.o: webproxy.c
@@ -19,6 +19,12 @@ tester.o: tester.c
 
 readline.o: readline.c
 	$(CC) $(CFLAGS) -c $ readline.c
+
+strutils.o: utils.c
+	$(CC) $(CFLAGS) -c $ utils.c
+
+test: test.o config.o
+	$(CC) $(CFLAGS) -o test $^
 
 clean:
 	rm -f *.o webproxy

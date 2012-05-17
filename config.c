@@ -13,9 +13,11 @@
  *
  */
 
+#include <sys/types.h>
+
 #include <ctype.h>
 #include <string.h>
-#include <sys/types.h>
+
 #include "config.h"
 
 #define MAX_CONF_LEN 256
@@ -28,13 +30,13 @@ config_new_section(char *name)
 {
     struct config_sect *new_sect;
 
-    new_sect = (struct config_sect *) malloc(sizeof(struct config_sect));
+    new_sect = malloc(sizeof(*new_sect));
     if (new_sect) {
         new_sect->name = strdup(name);
         new_sect->tokens = NULL;
         new_sect->next = NULL;
     }
-    return (new_sect);
+    return new_sect;
 }                               /* config_new_section () */
 
 struct config_token *
@@ -42,14 +44,13 @@ config_new_token(char *token, char *value)
 {
     struct config_token *new_token;
 
-    new_token =
-        (struct config_token *) malloc(sizeof(struct config_token));
+    new_token = malloc(sizeof(*new_token));
     if (new_token) {
         new_token->token = strdup(token);
         new_token->value = strdup(value);
         new_token->next = NULL;
     }
-    return (new_token);
+    return new_token;
 }                               /* config_new_token () */
 
 /*
@@ -72,7 +73,7 @@ config_load(char *filename)
         return NULL;
     }
 
-    while (fgets(line, MAX_CONF_LEN, fp)) {
+    while (fgets(line, MAX_CONF_LEN, fp) != NULL) {
         if (line[0] == '#')
             continue;           /* skip lines with comment */
         if (strlen(line) <= 1)
@@ -82,8 +83,8 @@ config_load(char *filename)
             token = strtok(line + 1, "]");
             if (token != NULL) {
                 struct config_sect *new_sect = config_new_section(token);
-                if (new_sect) {
-                    if (cur_sect) {
+                if (new_sect != NULL) {
+                    if (cur_sect != NULL) {
                         cur_sect->next = new_sect;
                     } else {
                         sects = new_sect;
@@ -97,12 +98,12 @@ config_load(char *filename)
             if (token != NULL) {
                 struct config_token *new_token;
                 value = strtok(value, " =#\t");
-                if (!cur_sect) {
+                if (cur_sect == NULL) {
                     cur_sect = config_new_section("default");
                     sects = cur_sect;
                 }
                 new_token = config_new_token(token, value);
-                if (new_token) {
+                if (new_token != NULL) {
                     if (cur_token) {
                         cur_token->next = new_token;
                     } else {
@@ -121,11 +122,11 @@ char           *
 config_get_value(struct config_sect *sects, char *section, char *token,
                  int icase)
 {
-    while (sects) {
+    while (sects != NULL) {
         if ((icase ? strcasecmp(section, sects->name) :
              strcmp(section, sects->name)) == 0) {
             struct config_token *tokens = sects->tokens;
-            while (tokens) {
+            while (tokens != NULL) {
                 if ((icase ? strcasecmp(token, tokens->token) :
                      strcmp(token, tokens->token)) == 0) {
                     return (tokens->value);
@@ -135,16 +136,16 @@ config_get_value(struct config_sect *sects, char *section, char *token,
         }
         sects = sects->next;
     }
-    return (NULL);
+    return NULL;
 }                               /* config_get_value () */
 
 void
 config_dump(struct config_sect *sects)
 {
-    while (sects) {
+    while (sects != NULL) {
         printf("[%s]\n", sects->name);
         struct config_token *tokens = sects->tokens;
-        while (tokens) {
+        while (tokens != NULL) {
             printf("%s\t%s\n", tokens->token, tokens->value);
             tokens = tokens->next;
         }
@@ -155,10 +156,10 @@ config_dump(struct config_sect *sects)
 void
 config_destroy(struct config_sect *sects)
 {
-    while (sects) {
+    while (sects != NULL) {
         struct config_sect *next = sects->next;
         struct config_token *token = sects->tokens;
-        while (token) {
+        while (token != NULL) {
             struct config_token *next_token = token->next;
             free(memset(token->token, 0, strlen(token->token)));
             free(memset(token->value, 0, strlen(token->value)));

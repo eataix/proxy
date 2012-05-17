@@ -14,15 +14,15 @@
 #define CONF_PATH_LEN 256
 
 struct config_token {
-	char *token;
-	char *value;
-	struct config_token *next;
+        char *token;
+        char *value;
+        struct config_token *next;
 };
 
 struct config_sect {
-	char *name;
-	struct config_token *tokens;
-	struct config_sect *next;
+        char *name;
+        struct config_token *tokens;
+        struct config_sect *next;
 };
 
 struct config_sect *config_load (char *filename);

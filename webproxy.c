@@ -38,21 +38,25 @@
 
 #include "dbg.h"
 #include "readline.h"
+#include "config.h"
+#include "utils.h"
 
 #define BUFFER_SIZE INT32_MAX
-#define RATE_LIMIT  2000
+//#define RATE_LIMIT  2000
+//#define FACTOR      (USECOND_PER_SECOND / RATE_LIMIT)
 #define USECOND_PER_SECOND 1000000
-#define FACTOR      (USECOND_PER_SECOND / RATE_LIMIT)
 #define BYTES_TO_KBYTES(A) (A / 1024)
 #define KBYTES_TO_BYTES(A) (A * 1024)
-#define CHUNK_SIZE  102400
 
 struct peer {
     int             socketfd;
     int             flag;
     char           *buffer;
     int             bytes_read;
+    char *hostname;
 };
+
+struct config_sect *conf;
 
 void
 sigHandler(int sig)
@@ -61,8 +65,9 @@ sigHandler(int sig)
         printf("Catch interrupt.\n");
         kill(0, SIGTERM);
     } else if (sig == SIGTERM) {
-        sleep(2);
         printf("Catch termination.\n");
+        sleep(2);
+        config_destroy(conf);
         exit(EXIT_SUCCESS);
     }
 }
@@ -134,7 +139,6 @@ extract_header(const char *line, const char *key)
 int
 process(char *str, const int str_len)
 {
-
     const char     *prefix = "http://";
     int             length = strlen(prefix);
 
@@ -173,7 +177,6 @@ proxy(int sfd)
 
     struct peer    *client = malloc(sizeof(*client));
     struct peer    *serveri = malloc(sizeof(*serveri));
-
     memset(client, 0, sizeof(*client));
     memset(serveri, 0, sizeof(*serveri));
 
@@ -211,6 +214,7 @@ proxy(int sfd)
                 extract_header(client->buffer + client->bytes_read,
                                "Host: ");
             serveri->socketfd = make_socket(hostname, "http");
+            serveri->hostname = hostname;
             // fcntl(sfd, F_SETFL, O_NONBLOCK);
         }
         client->bytes_read += byte_count;
@@ -275,6 +279,25 @@ proxy(int sfd)
         // printf("select\n");
     }
 
+    int rate = -1;
+
+    while (conf != NULL) {
+            if (strcasecmp(conf->name, "rates") == 0) {
+                    struct config_token *token = conf->tokens;
+                    while (token != NULL) {
+                            if (endswith(serveri->hostname, token->token, 1) == 0) {
+                                    printf("a hit : %d\n", atoi(token->value));
+                                    rate = atoi(token->value);
+
+                            } else {
+                                    printf("%s != %s\n", serveri->hostname, token->token);
+                            }
+                            token = token->next;
+                    }
+            }
+            conf = conf->next;
+    }
+
 
     tv.tv_sec = 10;
     tv.tv_usec = 0;
@@ -302,11 +325,19 @@ proxy(int sfd)
 
         if (serveri->socketfd != -1
             && FD_ISSET(serveri->socketfd, &read_fds)) {
-            tv.tv_sec = 1;
-            byte_count =
-                recv(serveri->socketfd,
-                     serveri->buffer + serveri->bytes_read,
-                     KBYTES_TO_BYTES(RATE_LIMIT) * 20, 0);
+            tv.tv_sec = 2;
+
+            if (rate == -1) {
+                byte_count = recv(serveri->socketfd,
+                                  serveri->buffer + serveri->bytes_read,
+                                  BUFFER_SIZE,
+                                  0);
+            } else {
+                byte_count = recv(serveri->socketfd,
+                                  serveri->buffer + serveri->bytes_read,
+                                  KBYTES_TO_BYTES(rate) * 20,
+                                  0);
+            }
 
             // printf("read: %d bytes", byte_count);
 
@@ -334,12 +365,13 @@ proxy(int sfd)
             // (prev.tv_sec - second) * 1000000 - (prev.tv_usec -
             // usecond);
 
-            count = (useconds_t) (FACTOR * BYTES_TO_KBYTES(byte_count)) -
-                ((useconds_t) (prev.tv_sec - second)) *
-                USECOND_PER_SECOND - (prev.tv_usec - usecond);
+            if (rate != -1) {
+                    count = (useconds_t) (USECOND_PER_SECOND / rate * BYTES_TO_KBYTES(byte_count)) -
+                            ((useconds_t) (prev.tv_sec - second)) * USECOND_PER_SECOND - (prev.tv_usec - usecond);
 
-            if (count >= 0)
-                usleep(count);
+                    if (count >= 0)
+                            usleep(count);
+            }
 
             continue;
         }
@@ -372,11 +404,15 @@ main()
     struct addrinfo hints,
                    *servinfo;
     int             optval;
-    // setbuf(stdout, NULL);
+    setbuf(stdout, NULL);
 
     signal(SIGCHLD, SIG_IGN);
     signal(SIGINT, sigHandler);
     signal(SIGTERM, sigHandler);
+
+    conf = config_load("example.conf");
+    config_dump(conf);
+
 
     memset(&hints, 0, sizeof(hints));
     hints.ai_family = AF_INET;
