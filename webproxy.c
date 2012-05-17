@@ -90,7 +90,7 @@ make_socket(const char *name, const char *port)
                    *ai,
                    *p;
     int             s;
-    printf("prepare to connect to %s\n", name);
+    printf("prepare to connect to host: %s port:%s\n", name, port);
 
     memset(&hints, 0, sizeof(hints));
     hints.ai_family = AF_UNSPEC;
@@ -170,10 +170,35 @@ process(char *str, const int str_len)
 }
 
 void
+parsehostname(const char *raw_hostname, char **hostname, char **port)
+{
+    char           *newstr;
+    newstr = strdup(raw_hostname);
+
+    char           *p;
+    if ((p = strtok(newstr, ":")) == NULL) {
+        *hostname = strdup(newstr);
+        *port = "http";
+    } else {
+        *hostname = strdup(p);
+        printf("hostname : %s", *hostname);
+        if ((p = strtok(NULL, ":")) == NULL) {
+            *port = "http";
+        } else {
+            *port = strdup(p);
+        }
+    }
+
+    printf("host: %s port: %s\n", *hostname, *port);
+}
+
+void
 proxy(int sfd)
 {
     int             byte_count = 0;
-    char           *hostname = NULL;
+    char           *raw_hostname = NULL,
+        *hostname = NULL,
+        *port = NULL;
 
     signal(SIGTERM, childSigHandler);
 
@@ -211,11 +236,13 @@ proxy(int sfd)
         }
 
         if (strncmp(client->buffer + client->bytes_read, "Host: ", 6) == 0) {
-            printf("host");
-            hostname =
+            printf("host\n");
+            raw_hostname =
                 extract_header(client->buffer + client->bytes_read,
                                "Host: ");
-            serveri->socketfd = make_socket(hostname, "http");
+            parsehostname(raw_hostname, &hostname, &port);
+            printf("host: %s port: %s\n", hostname, port);
+            serveri->socketfd = make_socket(hostname, port);
             serveri->hostname = hostname;
             // fcntl(sfd, F_SETFL, O_NONBLOCK);
         }
@@ -319,8 +346,6 @@ proxy(int sfd)
     struct timespec sleeptime;
     sleeptime.tv_sec = 0;
     sleeptime.tv_nsec = 0;
-
-    int current_rate;
 
     for (;;) {
         gettimeofday(&prev, NULL);
