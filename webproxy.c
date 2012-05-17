@@ -35,6 +35,7 @@
 #include <signal.h>
 #include <fcntl.h>
 #include <ctype.h>
+#include <time.h>
 
 #include "dbg.h"
 #include "readline.h"
@@ -42,18 +43,19 @@
 #include "utils.h"
 
 #define BUFFER_SIZE INT32_MAX
-//#define RATE_LIMIT  2000
-//#define FACTOR      (USECOND_PER_SECOND / RATE_LIMIT)
+// #define RATE_LIMIT 2000
+// #define FACTOR (USECOND_PER_SECOND / RATE_LIMIT)
 #define USECOND_PER_SECOND 1000000
 #define BYTES_TO_KBYTES(A) (A / 1024)
 #define KBYTES_TO_BYTES(A) (A * 1024)
+#define _POSIX_C_SOURCE
 
 struct peer {
     int             socketfd;
     int             flag;
     char           *buffer;
     int             bytes_read;
-    char *hostname;
+    char           *hostname;
 };
 
 struct config_sect *conf;
@@ -279,23 +281,23 @@ proxy(int sfd)
         // printf("select\n");
     }
 
-    int rate = -1;
+    int             rate = -1;
 
     while (conf != NULL) {
-            if (strcasecmp(conf->name, "rates") == 0) {
-                    struct config_token *token = conf->tokens;
-                    while (token != NULL) {
-                            if (endswith(serveri->hostname, token->token, 1) == 0) {
-                                    printf("a hit : %d\n", atoi(token->value));
-                                    rate = atoi(token->value);
+        if (strcasecmp(conf->name, "rates") == 0) {
+            struct config_token *token = conf->tokens;
+            while (token != NULL) {
+                if (endswith(serveri->hostname, token->token, 1) == 0) {
+                    printf("a hit : %d\n", atoi(token->value));
+                    rate = atoi(token->value);
 
-                            } else {
-                                    printf("%s != %s\n", serveri->hostname, token->token);
-                            }
-                            token = token->next;
-                    }
+                } else {
+                    printf("%s != %s\n", serveri->hostname, token->token);
+                }
+                token = token->next;
             }
-            conf = conf->next;
+        }
+        conf = conf->next;
     }
 
 
@@ -313,6 +315,13 @@ proxy(int sfd)
     suseconds_t     usecond;
     int             count;
 
+
+    struct timespec sleeptime;
+    sleeptime.tv_sec = 0;
+    sleeptime.tv_nsec = 0;
+
+    int current_rate;
+
     for (;;) {
         gettimeofday(&prev, NULL);
 
@@ -323,6 +332,9 @@ proxy(int sfd)
             _exit(1);
         }
 
+        int             factor = USECOND_PER_SECOND / rate;
+
+
         if (serveri->socketfd != -1
             && FD_ISSET(serveri->socketfd, &read_fds)) {
             tv.tv_sec = 2;
@@ -330,13 +342,11 @@ proxy(int sfd)
             if (rate == -1) {
                 byte_count = recv(serveri->socketfd,
                                   serveri->buffer + serveri->bytes_read,
-                                  BUFFER_SIZE,
-                                  0);
+                                  BUFFER_SIZE, 0);
             } else {
                 byte_count = recv(serveri->socketfd,
                                   serveri->buffer + serveri->bytes_read,
-                                  KBYTES_TO_BYTES(rate) * 20,
-                                  0);
+                                  KBYTES_TO_BYTES(rate), 0);
             }
 
             // printf("read: %d bytes", byte_count);
@@ -360,17 +370,15 @@ proxy(int sfd)
             usecond = prev.tv_usec;
             gettimeofday(&prev, NULL);
 
-            // count = (useconds_t) ((long)1000000 * (byte_count / 1024) / 
-            // 3000) -
-            // (prev.tv_sec - second) * 1000000 - (prev.tv_usec -
-            // usecond);
 
             if (rate != -1) {
-                    count = (useconds_t) (USECOND_PER_SECOND / rate * BYTES_TO_KBYTES(byte_count)) -
-                            ((useconds_t) (prev.tv_sec - second)) * USECOND_PER_SECOND - (prev.tv_usec - usecond);
-
-                    if (count >= 0)
-                            usleep(count);
+                count =
+                    (useconds_t) (factor * BYTES_TO_KBYTES(byte_count)) -
+                    ((useconds_t) (prev.tv_sec - second)) *
+                    USECOND_PER_SECOND - (prev.tv_usec - usecond);
+                sleeptime.tv_nsec = count * 1000;
+                if (count >= 0)
+                    nanosleep(&sleeptime, NULL);
             }
 
             continue;

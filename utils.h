@@ -29,18 +29,19 @@
 
 typedef enum { TRUE, FALSE } BOOLEAN;
 
-int indexOf(const char *s1, const char *s2, int caseinsensitive);
+int             indexOf(const char *s1, const char *s2,
+                        int caseinsensitive);
 
 BOOLEAN
-contains(const char *s1, const char *s2, int caseinsensitive);
+        contains(const char *s1, const char *s2, int caseinsensitive);
 
 BOOLEAN
-endswith(const char *s1, const char *s2, const int caseinsensitive);
+ 
+      endswith(const char *s1, const char *s2, const int caseinsensitive);
 
-size_t
-mystrlen(const char *str);
+size_t          mystrlen(const char *str);
 
-char *
-removeAll(const char *s1, const char *s2, const int caseinsensitive);
+char           *removeAll(const char *s1, const char *s2,
+                          const int caseinsensitive);
 
-#endif  /* STRUTILS_H_ */
+#endif                          /* STRUTILS_H_ */

@@ -1,6 +1,6 @@
 #flags
 CC = clang
-CFLAGS = -Wall -O2 -g -Wextra
+CFLAGS = -Wall -O3 -g -Wextra
 
 #targets
 all: webproxy
