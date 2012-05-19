@@ -43,8 +43,6 @@
 #include "utils.h"
 
 #define BUFFER_SIZE INT32_MAX
-// #define RATE_LIMIT 2000
-// #define FACTOR (USECOND_PER_SECOND / RATE_LIMIT)
 #define USECOND_PER_SECOND 1000000
 #define BYTES_TO_KBYTES(A) (A / 1024)
 #define KBYTES_TO_BYTES(A) (A * 1024)
@@ -52,7 +50,6 @@
 
 struct peer {
     int             socketfd;
-    int             flag;
     char           *buffer;
     int             bytes_read;
     char           *hostname;
@@ -60,10 +57,17 @@ struct peer {
 
 struct config_sect *conf;
 
+
+/*
+ * Signal handler of the parent process.
+ */
 void
 sigHandler(int sig)
 {
     if (sig == SIGINT) {
+        /*
+         * If the user press "Ctrl-C", terminate all the child processes.
+         */
         printf("Catch interrupt.\n");
         kill(0, SIGTERM);
     } else if (sig == SIGTERM) {
@@ -74,101 +78,148 @@ sigHandler(int sig)
     }
 }
 
+/*
+ * Signal handler of the child process.
+ */
 void
 childSigHandler(int sig)
 {
     if (sig == SIGTERM) {
+        /*
+         * Clean up.
+         */
         printf("%d is going to terminate\n", getpid());
+        /****************************** WARNING ****************************
+         * The child process uses _exit(2) to terminate. The resources
+         * may not be fully released. Its parent should use exit(2) to
+         * terminate and releases the resources (e.g., file descriptors).
+         ******************************************************************/
         _exit(0);
     }
 }
 
+/*
+ * Establishes a connection with the really server.
+ * Returns the socket file descriptor with the server.
+ * Returns -1 on failure.
+ */
 int
 make_socket(const char *name, const char *port)
 {
     struct addrinfo hints,
                    *ai,
                    *p;
-    int             s;
-    printf("prepare to connect to host: %s port:%s\n", name, port);
+    int             sfd = -1;
+
+    printf("Prepare to connect to host: %s port:%s\n", name, port);
 
     memset(&hints, 0, sizeof(hints));
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
-    if (name == NULL) {
-        hints.ai_flags = AI_PASSIVE;
-    }
 
-    if (getaddrinfo(name, port, &hints, &ai) != 0) {
-        printf("Cannot getaddrinfo");
-        _exit(1);
-    }
+    check(getaddrinfo(name, port, &hints, &ai) == 0, "Cannot getaddrinfo");
 
     for (p = ai; p != NULL; p = p->ai_next) {
-        s = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
-        if (s < 0)
+        sfd = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
+        if (sfd == -1)
             continue;
         printf("created a file discriptor\n");
-        if (connect(s, p->ai_addr, p->ai_addrlen) != 0)
+        if (connect(sfd, p->ai_addr, p->ai_addrlen) != 0)
             continue;
         printf("Connected\n");
-        return s;
+        freeaddrinfo(ai);
+        return sfd;
     }
+
+  error:
     return -1;
 }
 
+/*
+ * Extracts the value of HTTP header.
+ * e.g., from "Host: example.com\r\n" to "example.com"
+ */
 char           *
 extract_header(const char *line, const char *key)
 {
     int             length;
     char           *header = NULL;
-    int             prefixLength;
+    int             prefix_length;
 
-    prefixLength = strlen(key);
-
-    length = strcspn(line, "\r\n") - prefixLength;
+    prefix_length = strlen(key);
+    length = strcspn(line, "\r\n") - prefix_length;
 
     header = malloc(length + 1);
     check(header != NULL, "Cannot allocate memory to extra");
+
     *header = '\0';
-    strncat(header, line + prefixLength, length);
+    strncat(header, line + prefix_length, length);
+
     return header;
 
   error:
     return NULL;
 }
 
+/*
+ * Converts the absolute URI to relative URI according to RFC2616.
+ * e.g., from "GET http://example.com HTTP/1.1"
+ *         to "GET / HTTP/1.1"
+ */
 int
 process(char *str, const int str_len)
 {
     const char     *prefix = "http://";
-    int             length = strlen(prefix);
+    const int       prefix_length = strlen(prefix);
 
-    char           *p = malloc(str_len + 1);
-    memset(p, 0, sizeof(*p));
-    memcpy(p, str, str_len);
-
-
+    char           *p = NULL;
     int             i,
                     j;
+
+    p = malloc(str_len + 1);
+    check(p != NULL, "Cannot allocate memory.");
+    memset(p, 0, sizeof *p);
+    memcpy(p, str, str_len);
+
     for (i = 0, j = 0; i < str_len && j < str_len; i++, j++) {
-        if (strncasecmp(p + j, prefix, length - 1) == 0) {
-            for (j += length;; j++) {
+        /*
+         * If find "http://", skip copying until found "/" or " " (space).
+         */
+        if (strncasecmp(p + j, prefix, prefix_length) == 0) {
+            for (j += prefix_length;; j++) {
                 if (p[j] == '/') {
                     break;
                 }
+                /*
+                 * RFC2616 5.1.2. Request-URI
+                 * ...if none is present in the original URI, it MUST be given as
+                 * "/" (the server root).
+                 */
                 if (p[j] == ' ') {
-                    str[i++] = '/';
+                    str[i] = '/';
+                    i++;
                     break;
                 }
             }
         }
+        /*
+         * Resume copying
+         */
         str[i] = p[j];
     }
 
+    free(p);
     return i;
+
+  error:
+    free(p);
+    return -1;
 }
 
+/*
+ * Parses the Host field of HTTP request header.
+ * e.g., "Host: example.com:8080" to hostname = example.com & port = 8080.
+ */
 void
 parsehostname(const char *raw_hostname, char **hostname, char **port)
 {
@@ -176,12 +227,12 @@ parsehostname(const char *raw_hostname, char **hostname, char **port)
     newstr = strdup(raw_hostname);
 
     char           *p;
+
     if ((p = strtok(newstr, ":")) == NULL) {
         *hostname = strdup(newstr);
         *port = "http";
     } else {
         *hostname = strdup(p);
-        printf("hostname : %s", *hostname);
         if ((p = strtok(NULL, ":")) == NULL) {
             *port = "http";
         } else {
@@ -246,6 +297,7 @@ proxy(int sfd)
             serveri->hostname = hostname;
             // fcntl(sfd, F_SETFL, O_NONBLOCK);
         }
+
         client->bytes_read += byte_count;
         if (byte_count == 2) {
             break;
@@ -257,6 +309,11 @@ proxy(int sfd)
     }
 
     send(serveri->socketfd, client->buffer, client->bytes_read, 0);
+
+    char           *p;
+    for (p = client->buffer; (p - client->buffer) < client->bytes_read;
+         p++)
+        putchar(*p);
 
 
     struct timeval  tv;

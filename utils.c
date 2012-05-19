@@ -31,7 +31,6 @@
 int
 indexOf(const char *s1, const char *s2, int caseinsensitive)
 {
-    const char     *p;
     int             s1_length;
     int             s2_length;
     int             i;
@@ -54,11 +53,31 @@ indexOf(const char *s1, const char *s2, int caseinsensitive)
     return -1;
 }
 
+int
+lastIndexOf(const char *s1, const char ch)
+{
+    const char     *p;
+    int             s1_length;
+
+    s1_length = strlen(s1);
+    if (s1_length == 0)
+        return -1;
+
+    for (p = s1 + s1_length - 1;; p--) {
+        if (ch == *p) {
+            return p - s1;
+        }
+        if (p == s1) {
+            break;
+        }
+    }
+    return -1;
+}
+
 
 BOOLEAN
 contains(const char *s1, const char *s2, int caseinsensitive)
 {
-    const char     *p;
     int             s1_length;
     int             s2_length;
     int             i;
