@@ -251,29 +251,46 @@ proxy(int sfd)
         *hostname = NULL,
         *port = NULL;
 
-    signal(SIGTERM, childSigHandler);
-
-    struct peer    *client = malloc(sizeof(*client));
-    struct peer    *serveri = malloc(sizeof(*serveri));
-    memset(client, 0, sizeof(*client));
-    memset(serveri, 0, sizeof(*serveri));
-
-    serveri->socketfd = -1;
-
-    check((client->buffer = malloc(BUFFER_SIZE)) != NULL,
-          "Cannot allocate memory for buffer");
-    check((serveri->buffer = malloc(BUFFER_SIZE)) != NULL,
-          "Cannot allocate memory for buffer");
-
     fd_set          master,
                     read_fds;
 
     int             fdmax;
     int             line_count = 0;
 
-    client->socketfd = sfd;
-    // fdmax = sfd;
+    struct peer    *client = NULL;
+    struct peer    *serveri = NULL;
 
+    struct timeval  tv;
+    int             rate = -1;
+    int             factor;
+
+    struct timeval  current_time;
+    time_t          prev_second;
+    suseconds_t     prev_usecond;
+    int             sleep_time;
+
+    struct timespec ts;
+
+
+    signal(SIGTERM, childSigHandler);
+
+    client = malloc(sizeof(*client));
+    check(client != NULL, "Cannot allocate memory.");
+    memset(client, 0, sizeof(*client));
+
+    client->socketfd = sfd;
+    client->buffer = malloc(BUFFER_SIZE);
+    check(client->buffer != NULL, "Cannot allocate memory for buffer");
+    client->bytes_read = 0;
+
+    serveri = malloc(sizeof(*serveri));
+    check(serveri != NULL, "Cannot allocate memory.");
+    memset(serveri, 0, sizeof(*serveri));
+
+    serveri->socketfd = -1;
+    serveri->buffer = malloc(BUFFER_SIZE);
+    check(serveri->buffer != NULL, "Cannot allocate memory for buffer");
+    serveri->bytes_read = 0;
 
     for (;;) {
         byte_count =
@@ -295,77 +312,51 @@ proxy(int sfd)
             printf("host: %s port: %s\n", hostname, port);
             serveri->socketfd = make_socket(hostname, port);
             serveri->hostname = hostname;
-            // fcntl(sfd, F_SETFL, O_NONBLOCK);
         }
 
         client->bytes_read += byte_count;
+
         if (byte_count == 2) {
             break;
         }
     }
 
-    if (serveri->socketfd == -1) {
-        _exit(EXIT_FAILURE);
-    }
+    check((serveri->socketfd != -1), "Cannot connect to the real server.");
 
     send(serveri->socketfd, client->buffer, client->bytes_read, 0);
 
-    char           *p;
-    for (p = client->buffer; (p - client->buffer) < client->bytes_read;
-         p++)
-        putchar(*p);
-
-
-    struct timeval  tv;
     tv.tv_sec = 0;
-    tv.tv_usec = 500000;
-
-    client->bytes_read = 0;
+    tv.tv_usec = 200000;
 
     FD_ZERO(&master);
-    FD_SET(sfd, &master);
+    FD_SET(client->socketfd, &master);
     fdmax = client->socketfd;
+
     for (;;) {
         read_fds = master;
 
-        if (select(fdmax + 1, &read_fds, NULL, NULL, &tv) == -1) {
-            printf("cannot select \n");
-            _exit(1);
-        }
+        check(select(fdmax + 1, &read_fds, NULL, NULL, &tv) != -1,
+              "Cannot select.");
 
         if (FD_ISSET(client->socketfd, &read_fds)) {
-            // printf("read line from client\n");
-            byte_count =
-                recv(client->socketfd, client->buffer + client->bytes_read,
-                     1024, 0);
 
-            if (byte_count == -1) {
-                _exit(1);
-            }
-
-            client->bytes_read += byte_count;
+            byte_count = recv(client->socketfd, client->buffer, 1024, 0);
+            check(byte_count != -1,
+                  "Error when receiving data from the client.");
+            check(byte_count != 0,
+                  "The client has terminated the connection.");
 
             byte_count =
-                send(serveri->socketfd, client->buffer, client->bytes_read,
-                     0);
-
-            if (byte_count == 0) {
-                _exit(1);
-            }
-
-            client->bytes_read = 0;
+                send(serveri->socketfd, client->buffer, byte_count, 0);
+            check(byte_count != -1,
+                  "Error when sending data to the server.");
+            check(byte_count != 0,
+                  "The server has terminated the connection.");
 
             continue;
         }
-
-        if (client->bytes_read != 0)
-            send(serveri->socketfd, client->buffer, client->bytes_read, 0);
         break;
-
-        // printf("select\n");
     }
-
-    int             rate = -1;
 
     while (conf != NULL) {
         if (strcasecmp(conf->name, "rates") == 0) {
@@ -384,106 +375,91 @@ proxy(int sfd)
         conf = conf->next;
     }
 
+    config_destroy(conf);
 
     tv.tv_sec = 10;
     tv.tv_usec = 0;
-
-    serveri->bytes_read = 0;
 
     FD_ZERO(&master);
     FD_SET(serveri->socketfd, &master);
     fdmax = serveri->socketfd;
 
-    struct timeval  prev;
-    time_t          second;
-    suseconds_t     usecond;
-    int             count;
-
-
-    struct timespec sleeptime;
-    sleeptime.tv_sec = 0;
-    sleeptime.tv_nsec = 0;
+    factor = USECOND_PER_SECOND / rate;
+    memset(&ts, 0, sizeof(ts));
 
     for (;;) {
-        gettimeofday(&prev, NULL);
+        gettimeofday(&current_time, NULL);
 
         read_fds = master;
 
-        if (select(fdmax + 1, &read_fds, NULL, NULL, &tv) == -1) {
-            printf("cannot select \n");
-            _exit(1);
-        }
+        check(select(fdmax + 1, &read_fds, NULL, NULL, &tv) != -1,
+              "Cannot select.");
 
-        int             factor = USECOND_PER_SECOND / rate;
+        if (FD_ISSET(serveri->socketfd, &read_fds)) {
 
-
-        if (serveri->socketfd != -1
-            && FD_ISSET(serveri->socketfd, &read_fds)) {
             tv.tv_sec = 2;
 
             if (rate == -1) {
                 byte_count = recv(serveri->socketfd,
-                                  serveri->buffer + serveri->bytes_read,
-                                  BUFFER_SIZE, 0);
+                                  serveri->buffer, KBYTES_TO_BYTES(10), 0);
             } else {
                 byte_count = recv(serveri->socketfd,
-                                  serveri->buffer + serveri->bytes_read,
+                                  serveri->buffer,
                                   KBYTES_TO_BYTES(rate), 0);
             }
 
-            // printf("read: %d bytes", byte_count);
-
-            if (byte_count == -1) {
-                _exit(1);
-            }
-
-            serveri->bytes_read += byte_count;
+            check(byte_count != -1,
+                  "Error when receiving data from the real server.");
+            check(byte_count != 0,
+                  "The server has terminated the connection.");
 
             byte_count =
-                send(client->socketfd, serveri->buffer,
-                     serveri->bytes_read, 0);
+                send(client->socketfd, serveri->buffer, byte_count, 0);
 
-            if (byte_count <= 0) {
-                _exit(1);
-            }
+            check(byte_count != -1,
+                  "Error when sending data to the client.");
+            check(byte_count != 0,
+                  "The client has terminated the connection.");
 
-            serveri->bytes_read = 0;
-            second = prev.tv_sec;
-            usecond = prev.tv_usec;
-            gettimeofday(&prev, NULL);
-
+            prev_second = current_time.tv_sec;
+            prev_usecond = current_time.tv_usec;
+            gettimeofday(&current_time, NULL);
 
             if (rate != -1) {
-                count =
+                sleep_time =
                     (useconds_t) (factor * BYTES_TO_KBYTES(byte_count)) -
-                    ((useconds_t) (prev.tv_sec - second)) *
-                    USECOND_PER_SECOND - (prev.tv_usec - usecond);
-                sleeptime.tv_nsec = count * 1000;
-                if (count >= 0)
-                    nanosleep(&sleeptime, NULL);
+                    ((useconds_t) (current_time.tv_sec - prev_second)) *
+                    USECOND_PER_SECOND - (current_time.tv_usec -
+                                          prev_usecond);
+                if (sleep_time >= 0) {
+                    ts.tv_nsec = sleep_time * 1000;
+                    nanosleep(&ts, NULL);
+                }
             }
-
             continue;
         }
-
-        if (serveri->bytes_read != 0)
-            send(client->socketfd, serveri->buffer, serveri->bytes_read,
-                 0);
         break;
-
     }
 
     printf("finish\n");
     free(serveri->buffer);
     free(client->buffer);
+    free(client);
+    free(serveri);
+    free(raw_hostname);
     close(serveri->socketfd);
     close(client->socketfd);
-    _exit(0);
+    _exit(EXIT_SUCCESS);
 
   error:
+    free(serveri->buffer);
+    free(client->buffer);
+    free(client);
+    free(serveri);
+    free(raw_hostname);
     close(serveri->socketfd);
     close(client->socketfd);
-    _exit(1);
+    _exit(EXIT_FAILURE);
 }
 
 int
@@ -529,14 +505,12 @@ main()
 
         switch (fork()) {
         case 0:
-            // printf("fork");
             proxy(newfd);
             break;
         default:
             close(newfd);
             continue;
         }
-        // printf("finish");
     }
 
     return EXIT_SUCCESS;
