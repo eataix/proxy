@@ -142,9 +142,10 @@ config_get_value(struct config_sect *sects, char *section, char *token,
 void
 config_dump(struct config_sect *sects)
 {
+    struct config_token *tokens;
     while (sects != NULL) {
         printf("[%s]\n", sects->name);
-        struct config_token *tokens = sects->tokens;
+        tokens = sects->tokens;
         while (tokens != NULL) {
             printf("%s\t%s\n", tokens->token, tokens->value);
             tokens = tokens->next;

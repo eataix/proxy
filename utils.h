@@ -27,6 +27,19 @@
 #ifndef STRUTILS_H_
 #define STRUTILS_H_
 
+#define CLOSEFD(A)                \
+        do {                      \
+                if (A != -1)      \
+                        close(A); \
+        } while (0)
+
+#define FREEMEM(A)                \
+        do {                      \
+                if (A != NULL)    \
+                        free(A);  \
+                A = NULL;         \
+        } while (0)
+
 typedef enum { TRUE, FALSE } BOOLEAN;
 
 int             indexOf(const char *s1, const char *s2,

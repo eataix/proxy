@@ -106,7 +106,6 @@ endswith(const char *s1, const char *s2, const int caseinsensitive)
     int             s1_length;
     int             s2_length;
     int             offset;
-    int             i;
 
     s1_length = strlen(s1);
     s2_length = strlen(s2);
@@ -146,15 +145,15 @@ char           *
 removeAll(const char *s1, const char *s2, const int caseinsensitive)
 {
     char           *newstr;
-    newstr = malloc(mystrlen(s1) + strlen("\r\n"));
-    if (newstr == NULL) {
-        return NULL;
-    }
-
     int             s1_length;
     int             s2_length;
     int             i;
     int             j;
+
+    newstr = malloc(mystrlen(s1) + strlen("\r\n"));
+    if (newstr == NULL) {
+        return NULL;
+    }
 
     s1_length = strlen(s1);
     s2_length = strlen(s2);

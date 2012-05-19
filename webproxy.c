@@ -42,11 +42,23 @@
 #include "config.h"
 #include "utils.h"
 
-#define BUFFER_SIZE INT32_MAX
-#define USECOND_PER_SECOND 1000000
+#define BUFFER_SIZE (INT16_MAX)
+#define USECOND_PER_SECOND (1000000)
 #define BYTES_TO_KBYTES(A) (A / 1024)
 #define KBYTES_TO_BYTES(A) (A * 1024)
+
+#ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE
+#endif
+
+#define HOST_PREFIX        ("Host: ")
+#define HOST_PREFIX_LENGTH (strlen(HOST_PREFIX))
+
+#define CHUNKED_PREFIX     ("Transfer-Encoding: chunked")
+#define CHUNKED_PREFIX_LENGTH (strlen(CHUNKED_PREFIX))
+
+#define CONTENT_LENGTH_PREFIX ("Content-Length: ")
+#define CONTENT_LENGTH_PREFIX_LENGTH (strlen(CONTENT_LENGTH_PREFIX))
 
 struct peer {
     int             socketfd;
@@ -111,7 +123,8 @@ make_socket(const char *name, const char *port)
                    *p;
     int             sfd = -1;
 
-    printf("Prepare to connect to host: %s port:%s\n", name, port);
+    printf("%ld Prepare to connect to host: %s port:%s\n", (long) getpid(),
+           name, port);
 
     memset(&hints, 0, sizeof(hints));
     hints.ai_family = AF_UNSPEC;
@@ -221,56 +234,58 @@ process(char *str, const int str_len)
  * e.g., "Host: example.com:8080" to hostname = example.com & port = 8080.
  */
 void
-parsehostname(const char *raw_hostname, char **hostname, char **port)
+parsehostname(const char *raw_hostname, char *hostname, char *port)
 {
     char           *newstr;
+    char           *p;
     newstr = strdup(raw_hostname);
 
-    char           *p;
-
     if ((p = strtok(newstr, ":")) == NULL) {
-        *hostname = strdup(newstr);
-        *port = "http";
+        strcpy(hostname, newstr);
+        strcpy(port, "http");
     } else {
-        *hostname = strdup(p);
+        strcpy(hostname, p);
         if ((p = strtok(NULL, ":")) == NULL) {
-            *port = "http";
+            strcpy(port, "http");
         } else {
-            *port = strdup(p);
+            strcpy(port, p);
         }
     }
 
-    printf("host: %s port: %s\n", *hostname, *port);
+    free(newstr);
+
+    printf("host: %s port: %s\n", hostname, port);
 }
 
 void
 proxy(int sfd)
 {
-    int             byte_count = 0;
+    struct peer    *client = NULL;
+    struct peer    *serveri = NULL;
+
+    fd_set          master,
+                    read_fds;
+    int             fdmax;
+
+    int             line_count;
+    int             byte_count;
+
     char           *raw_hostname = NULL,
         *hostname = NULL,
         *port = NULL;
 
-    fd_set          master,
-                    read_fds;
-
-    int             fdmax;
-    int             line_count = 0;
-
-    struct peer    *client = NULL;
-    struct peer    *serveri = NULL;
-
     struct timeval  tv;
-    int             rate = -1;
+    int             rate;
     int             factor;
 
     struct timeval  current_time;
+    struct timespec ts;
     time_t          prev_second;
     suseconds_t     prev_usecond;
     int             sleep_time;
+    int             content_flag;
 
-    struct timespec ts;
-
+    struct config_sect *p;
 
     signal(SIGTERM, childSigHandler);
 
@@ -292,26 +307,89 @@ proxy(int sfd)
     check(serveri->buffer != NULL, "Cannot allocate memory for buffer");
     serveri->bytes_read = 0;
 
+    hostname = malloc(200);
+    check(hostname != NULL, "Cannot allocate memory.");
+    memset(hostname, 0, sizeof(*hostname));
+
+    port = malloc(20);
+    check(port != NULL, "Cannot allocate memory.");
+    memset(port, 0, sizeof(*port));
+
+  start:
+    line_count = 0;
+    byte_count = 0;
+    rate = -1;
+    content_flag = 0;
+
+    FD_ZERO(&master);
+    FD_SET(client->socketfd, &master);
+    fdmax = client->socketfd;
+
+    tv.tv_sec = 1;
+    tv.tv_usec = 0;
+
     for (;;) {
+        read_fds = master;
+        select(fdmax + 1, &read_fds, NULL, NULL, &tv);
+
+        if (!FD_ISSET(client->socketfd, &read_fds)) {
+            goto error;
+        }
+
         byte_count =
             readLine(client->socketfd, client->buffer + client->bytes_read,
-                     500);
+                     KBYTES_TO_BYTES(2));
+
+        check(byte_count != -1, "Cannot read.")
+
+            if (byte_count == 0)
+            goto cleanup;
+
         line_count++;
 
         if (line_count == 1) {
+            int             i;
+            printf("%ld is: ", (long) getpid());
+            for (i = 0; i < byte_count; i++) {
+                putchar(*(client->buffer + client->bytes_read + i));
+            }
+
             byte_count =
                 process(client->buffer + client->bytes_read, byte_count);
         }
 
-        if (strncmp(client->buffer + client->bytes_read, "Host: ", 6) == 0) {
-            printf("host\n");
+        if (strncmp
+            (client->buffer + client->bytes_read, HOST_PREFIX,
+             HOST_PREFIX_LENGTH) == 0) {
+            printf("host %s %s\n", serveri->hostname, hostname);
+            FREEMEM(raw_hostname);
             raw_hostname =
                 extract_header(client->buffer + client->bytes_read,
-                               "Host: ");
-            parsehostname(raw_hostname, &hostname, &port);
+                               HOST_PREFIX);
+            parsehostname(raw_hostname, hostname, port);
             printf("host: %s port: %s\n", hostname, port);
-            serveri->socketfd = make_socket(hostname, port);
-            serveri->hostname = hostname;
+            printf("host %s %s\n", serveri->hostname, hostname);
+            if (serveri->socketfd == -1
+                || strcasecmp(serveri->hostname, hostname) != 0) {
+                serveri->socketfd = make_socket(hostname, port);
+                FREEMEM(serveri->hostname);
+                serveri->hostname = strdup(hostname);
+            } else {
+                if (serveri->hostname != NULL)
+                    printf("%ld is reusing: %s %s", (long) getpid(),
+                           serveri->hostname, hostname);
+            }
+        } else
+            if (strncmp
+                (client->buffer + client->bytes_read, CHUNKED_PREFIX,
+                 CHUNKED_PREFIX_LENGTH) == 0) {
+            content_flag = 1;
+        } else
+            if (strncmp
+                (client->buffer + client->bytes_read,
+                 CONTENT_LENGTH_PREFIX,
+                 CONTENT_LENGTH_PREFIX_LENGTH) == 0) {
+            content_flag = 1;
         }
 
         client->bytes_read += byte_count;
@@ -319,18 +397,48 @@ proxy(int sfd)
         if (byte_count == 2) {
             break;
         }
+
     }
 
     check((serveri->socketfd != -1), "Cannot connect to the real server.");
+    check(send(serveri->socketfd, client->buffer, client->bytes_read, 0) ==
+          client->bytes_read, "Failed to send.");
+    client->bytes_read = 0;
 
-    send(serveri->socketfd, client->buffer, client->bytes_read, 0);
+    p = conf;
+    while (p != NULL) {
+        if (strcasecmp(p->name, "rates") == 0) {
+            struct config_token *token = p->tokens;
+            while (token != NULL) {
+                if (endswith(serveri->hostname, token->token, 1) == 0) {
+                    /*
+                     * printf("a hit : %d\n", atoi(token->value)); 
+                     */
+                    rate = atoi(token->value);
 
-    tv.tv_sec = 0;
-    tv.tv_usec = 200000;
+                } else {
+                    /*
+                     * printf("%s != %s\n", serveri->hostname,
+                     * token->token);
+                     */
+                }
+                token = token->next;
+            }
+        }
+        p = p->next;
+    }
 
     FD_ZERO(&master);
     FD_SET(client->socketfd, &master);
     fdmax = client->socketfd;
+
+    if (content_flag == 0) {
+        printf("No content skip to response.\n");
+        goto read_response;
+    }
+
+    tv.tv_sec = 1;
+    tv.tv_usec = 0;
 
     for (;;) {
         read_fds = master;
@@ -339,50 +447,35 @@ proxy(int sfd)
               "Cannot select.");
 
         if (FD_ISSET(client->socketfd, &read_fds)) {
-
             byte_count = recv(client->socketfd, client->buffer, 1024, 0);
             check(byte_count != -1,
                   "Error when receiving data from the client.");
-            check(byte_count != 0,
-                  "The client has terminated the connection.");
+            if (byte_count == 0)
+                goto cleanup;
 
             byte_count =
                 send(serveri->socketfd, client->buffer, byte_count, 0);
             check(byte_count != -1,
                   "Error when sending data to the server.");
-            check(byte_count != 0,
-                  "The server has terminated the connection.");
+            if (byte_count == 0)
+                goto cleanup;
 
             continue;
+        } else {
+            break;
         }
-        break;
     }
 
-    while (conf != NULL) {
-        if (strcasecmp(conf->name, "rates") == 0) {
-            struct config_token *token = conf->tokens;
-            while (token != NULL) {
-                if (endswith(serveri->hostname, token->token, 1) == 0) {
-                    printf("a hit : %d\n", atoi(token->value));
-                    rate = atoi(token->value);
-
-                } else {
-                    printf("%s != %s\n", serveri->hostname, token->token);
-                }
-                token = token->next;
-            }
-        }
-        conf = conf->next;
-    }
-
-    config_destroy(conf);
-
-    tv.tv_sec = 10;
-    tv.tv_usec = 0;
-
+  read_response:
     FD_ZERO(&master);
     FD_SET(serveri->socketfd, &master);
-    fdmax = serveri->socketfd;
+    FD_SET(client->socketfd, &master);
+    fdmax =
+        serveri->socketfd >
+        client->socketfd ? serveri->socketfd : client->socketfd;
+
+    tv.tv_sec = 5;
+    tv.tv_usec = 0;
 
     factor = USECOND_PER_SECOND / rate;
     memset(&ts, 0, sizeof(ts));
@@ -407,19 +500,17 @@ proxy(int sfd)
                                   serveri->buffer,
                                   KBYTES_TO_BYTES(rate), 0);
             }
-
             check(byte_count != -1,
                   "Error when receiving data from the real server.");
-            check(byte_count != 0,
-                  "The server has terminated the connection.");
+            if (byte_count == 0)
+                goto cleanup;
 
             byte_count =
                 send(client->socketfd, serveri->buffer, byte_count, 0);
-
             check(byte_count != -1,
                   "Error when sending data to the client.");
-            check(byte_count != 0,
-                  "The client has terminated the connection.");
+            if (byte_count == 0)
+                goto cleanup;
 
             prev_second = current_time.tv_sec;
             prev_usecond = current_time.tv_usec;
@@ -436,29 +527,44 @@ proxy(int sfd)
                     nanosleep(&ts, NULL);
                 }
             }
+
             continue;
+        } else if (FD_ISSET(client->socketfd, &read_fds)) {
+            line_count = 0;
+            goto start;
+        } else {
+            break;
         }
-        break;
     }
 
-    printf("finish\n");
-    free(serveri->buffer);
-    free(client->buffer);
-    free(client);
-    free(serveri);
-    free(raw_hostname);
-    close(serveri->socketfd);
-    close(client->socketfd);
+
+  cleanup:
+    printf("%ld finish\n", (long) getpid());
+    CLOSEFD(client->socketfd);
+    CLOSEFD(serveri->socketfd);
+    FREEMEM(serveri->hostname);
+    FREEMEM(client->buffer);
+    FREEMEM(serveri->buffer);
+    FREEMEM(client);
+    FREEMEM(serveri);
+    FREEMEM(raw_hostname);
+    FREEMEM(hostname);
+    FREEMEM(port);
+    config_destroy(conf);
     _exit(EXIT_SUCCESS);
 
   error:
-    free(serveri->buffer);
-    free(client->buffer);
-    free(client);
-    free(serveri);
-    free(raw_hostname);
-    close(serveri->socketfd);
-    close(client->socketfd);
+    CLOSEFD(client->socketfd);
+    CLOSEFD(serveri->socketfd);
+    FREEMEM(serveri->hostname);
+    FREEMEM(client->buffer);
+    FREEMEM(serveri->buffer);
+    FREEMEM(client);
+    FREEMEM(serveri);
+    FREEMEM(raw_hostname);
+    FREEMEM(hostname);
+    FREEMEM(port);
+    config_destroy(conf);
     _exit(EXIT_FAILURE);
 }
 
@@ -468,7 +574,8 @@ main()
     int             sfd,
                     newfd;
     struct addrinfo hints,
-                   *servinfo;
+                   *servinfo,
+                   *p;
     int             optval;
     setbuf(stdout, NULL);
 
@@ -481,24 +588,44 @@ main()
 
 
     memset(&hints, 0, sizeof(hints));
-    hints.ai_family = AF_INET;
+    hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
     hints.ai_flags = AI_PASSIVE;
 
     check(getaddrinfo(NULL, "8080", &hints, &servinfo) == 0,
           "cannot getaddrinfo");
 
-    sfd =
-        socket(servinfo->ai_family, servinfo->ai_socktype,
-               servinfo->ai_protocol);
-
     optval = 1;
-    setsockopt(sfd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval));
 
-    check(bind(sfd, servinfo->ai_addr, servinfo->ai_addrlen) != -1,
-          "cannot bind.");
+    for (p = servinfo; p != NULL; p = p->ai_next) {
+        sfd = socket(servinfo->ai_family, servinfo->ai_socktype,
+                     servinfo->ai_protocol);
+        if (sfd == -1) {
+            continue;
+        }
 
-    check(listen(sfd, 100) != -1, "Cannot listen");
+        if (setsockopt
+            (sfd, SOL_SOCKET, SO_REUSEADDR, &optval,
+             sizeof(optval)) == -1) {
+            continue;
+        }
+
+        if (bind(sfd, servinfo->ai_addr, servinfo->ai_addrlen) == -1) {
+            close(sfd);
+            continue;
+        }
+
+        break;
+    }
+
+    if (p == NULL) {
+        fprintf(stderr, "server: failed to bind\n");
+        goto error;
+    }
+
+    freeaddrinfo(servinfo);
+
+    check(listen(sfd, 10) != -1, "Cannot listen");
 
     while (1) {
         check((newfd = accept(sfd, NULL, NULL)) != -1, "cannot accept");
@@ -516,5 +643,7 @@ main()
     return EXIT_SUCCESS;
 
   error:
+    close(sfd);
+    freeaddrinfo(servinfo);
     return EXIT_FAILURE;
 }
