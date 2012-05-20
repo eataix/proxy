@@ -142,6 +142,15 @@ make_socket(const char *name, const char *port)
     printf("%ld Prepare to connect to host: %s port:%s\n", (long) getpid(),
            name, port);
 
+    {
+        int            *i;
+        i = (int *) addr;
+
+        while (*i == 1) {
+            usleep(USECOND_PER_SECOND / 2);
+        }
+    }
+
     for (ptr = (struct record *) (addr + sizeof(int));
          (char *) ptr - addr < 8804; ptr += (sizeof(*ptr))) {
         printf("Have not found matched\n");
@@ -184,6 +193,13 @@ make_socket(const char *name, const char *port)
             continue;
 
         printf("Connected to %s\n", p->ai_canonname);
+
+        {
+            int            *i;
+            i = (int *) addr;
+            *i = 1;
+        }
+
         for (ptr = (struct record *) (addr + sizeof(int));
              (char *) ptr - addr < 8804; ptr += sizeof(*ptr)) {
             if (ptr->valid == 1) {
@@ -196,6 +212,12 @@ make_socket(const char *name, const char *port)
             ptr->addr.ai_addr = (struct sockaddr *) &(ptr->sock);
             ptr->addr.ai_canonname = ptr->hostname;
             break;
+        }
+
+        {
+            int            *i;
+            i = (int *) addr;
+            *i = 0;
         }
 
         freeaddrinfo(ai);
