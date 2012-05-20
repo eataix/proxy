@@ -37,6 +37,11 @@
 #include <ctype.h>
 #include <time.h>
 
+#include <sys/stat.h>
+#include <fcntl.h>              /* Defines O_* constants */
+#include <sys/stat.h>           /* Defines mode constants */
+#include <sys/mman.h>
+
 #include "dbg.h"
 #include "readline.h"
 #include "config.h"
@@ -67,7 +72,16 @@ struct peer {
     char           *hostname;
 };
 
+struct record {
+    int             valid;
+    char            hostname[20];
+    struct addrinfo addr;
+    struct sockaddr_storage sock;
+};
+
 struct config_sect *conf;
+
+char           *addr;
 
 
 /*
@@ -85,6 +99,7 @@ sigHandler(int sig)
     } else if (sig == SIGTERM) {
         printf("Catch termination.\n");
         sleep(2);
+        shm_unlink("dnscache");
         config_destroy(conf);
         exit(EXIT_SUCCESS);
     }
@@ -122,13 +137,41 @@ make_socket(const char *name, const char *port)
                    *ai,
                    *p;
     int             sfd = -1;
+    struct record  *ptr;
 
     printf("%ld Prepare to connect to host: %s port:%s\n", (long) getpid(),
            name, port);
 
+    for (ptr = (struct record *) (addr + sizeof(int));
+         (char *) ptr - addr < 8804; ptr += (sizeof(*ptr))) {
+        printf("Have not found matched\n");
+        printf("the digit is %d\n", ptr->valid);
+        if (ptr->valid == 0) {
+            printf("Have not found matched\n");
+            break;
+        }
+        if (strcasecmp(ptr->hostname, name) == 0) {
+            sfd =
+                socket(ptr->addr.ai_family, ptr->addr.ai_socktype,
+                       ptr->addr.ai_protocol);
+            if (sfd == -1)
+                goto error;
+            if (connect(sfd, ptr->addr.ai_addr, ptr->addr.ai_addrlen) != 0)
+                goto error;
+            printf("Reusing dns cache%s\n", name);
+            return sfd;
+        } else {
+            printf("name is: %s length: %ld\n", ptr->addr.ai_canonname,
+                   strlen(ptr->addr.ai_canonname));
+        }
+    }
+
+    printf("Have not found matched\n");
+
     memset(&hints, 0, sizeof(hints));
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
+    hints.ai_flags |= AI_CANONNAME;
 
     check(getaddrinfo(name, port, &hints, &ai) == 0, "Cannot getaddrinfo");
 
@@ -139,7 +182,22 @@ make_socket(const char *name, const char *port)
         printf("created a file discriptor\n");
         if (connect(sfd, p->ai_addr, p->ai_addrlen) != 0)
             continue;
-        printf("Connected\n");
+
+        printf("Connected to %s\n", p->ai_canonname);
+        for (ptr = (struct record *) (addr + sizeof(int));
+             (char *) ptr - addr < 8804; ptr += sizeof(*ptr)) {
+            if (ptr->valid == 1) {
+                continue;
+            }
+            ptr->valid = 1;
+            strcpy(ptr->hostname, p->ai_canonname);
+            memcpy(&(ptr->sock), p->ai_addr, sizeof(*(p->ai_addr)));
+            memcpy(&(ptr->addr), p, sizeof(*(p)));
+            ptr->addr.ai_addr = (struct sockaddr *) &(ptr->sock);
+            ptr->addr.ai_canonname = ptr->hostname;
+            break;
+        }
+
         freeaddrinfo(ai);
         return sfd;
     }
@@ -571,12 +629,35 @@ proxy(int sfd)
 int
 main()
 {
-    int             sfd,
-                    newfd;
+    int             sfd = -1,
+        newfd = -1;
     struct addrinfo hints,
-                   *servinfo,
-                   *p;
+                   *servinfo = NULL,
+        *p = NULL;
     int             optval;
+    int             fd;
+
+    int             size =
+        50 * (sizeof(struct addrinfo) + sizeof(struct sockaddr_storage)) +
+        4;
+
+    fd = shm_open("dnscache", O_CREAT | O_EXCL | O_RDWR,
+                  S_IRUSR | S_IWUSR);
+
+    check(fd != -1, "Cannot create shared memory.");
+
+    printf("fd: %ld\n", (long) fd);
+
+    check(ftruncate(fd, size) != -1, "Cannot resize the object");
+
+    addr = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+
+    check(addr != MAP_FAILED, "Cannot map?!");
+
+    memset(addr, 0, size);
+
+    // memcpy(addr, str, strlen(str));
+
     setbuf(stdout, NULL);
 
     signal(SIGCHLD, SIG_IGN);
@@ -643,7 +724,8 @@ main()
     return EXIT_SUCCESS;
 
   error:
-    close(sfd);
+    shm_unlink("dnscache");
+    CLOSEFD(sfd);
     freeaddrinfo(servinfo);
     return EXIT_FAILURE;
 }

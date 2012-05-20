@@ -6,7 +6,7 @@ CFLAGS = -Wall -g -Wextra
 all: webproxy
 
 webproxy: webproxy.o config.o readline.o utils.o
-	$(CC) $(CFLAGS) -o $@ $^
+	$(CC) $(CFLAGS) -lrt -o $@ $^
 
 webproxy.o: webproxy.c
 	$(CC) $(CFLAGS) -c $ webproxy.c
