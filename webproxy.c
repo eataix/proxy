@@ -54,7 +54,7 @@
  * "If the port is empty or not given, port 80 is assumed."
  */
 #define DEFAULT_PORT ("80")
-#define NUM_RECORD (100)
+#define NUM_RECORD (2)
 
 #define BUFFER_SIZE (INT16_MAX)
 #define USECOND_PER_SECOND (1000000)
@@ -80,6 +80,7 @@ struct record {
     char            hostname[30];
     struct addrinfo addr;
     struct sockaddr_storage sock;
+    struct timeval  tv;
 };
 
 struct config_sect *conf;
@@ -156,10 +157,11 @@ make_socket(const char *name, const char *port)
     }
 
     for (ptr = (struct record *) (addr + sizeof(int));
-         (char *) ptr - addr < cache_size; ptr += (sizeof(*ptr))) {
-        if (ptr->valid == 0) {
+         (char *) ptr - (char *) addr < cache_size; ptr++) {
+
+        if (ptr->valid == 0)    // End of record.
             break;
-        }
+
         if (strcasecmp(ptr->hostname, name) == 0) {
             sfd =
                 socket(ptr->addr.ai_family, ptr->addr.ai_socktype,
@@ -169,10 +171,10 @@ make_socket(const char *name, const char *port)
             if (connect(sfd, ptr->addr.ai_addr, ptr->addr.ai_addrlen) != 0)
                 goto error;
             printf("Reusing dns cache%s\n", name);
+            gettimeofday(&(ptr->tv), NULL);
             return sfd;
         } else {
-            printf("name is: %s length: %ld\n", ptr->addr.ai_canonname,
-                   strlen(ptr->addr.ai_canonname));
+            printf("cache has: %s\n", ptr->hostname);
         }
     }
 
@@ -205,7 +207,9 @@ make_socket(const char *name, const char *port)
             int             hit;
             hit = 0;
             for (ptr = (struct record *) (addr + sizeof(int));
-                 (char *) ptr - addr < cache_size; ptr += sizeof(*ptr)) {
+                 (char *) ptr - (char *) addr < cache_size; ptr++) {
+                printf("loop %lu %lu\n", (char *) ptr - (char *) addr,
+                       cache_size);
                 if (ptr->valid == 1) {
                     continue;
                 }
@@ -213,22 +217,33 @@ make_socket(const char *name, const char *port)
                 ptr->valid = 1;
                 strcpy(ptr->hostname, p->ai_canonname);
                 memcpy(&(ptr->sock), p->ai_addr, sizeof(*(p->ai_addr)));
-                memcpy(&(ptr->addr), p, sizeof(*(p)));
+                memcpy(&(ptr->addr), p, sizeof(*p));
                 ptr->addr.ai_addr = (struct sockaddr *) &(ptr->sock);
                 ptr->addr.ai_canonname = ptr->hostname;
+                gettimeofday(&(ptr->tv), NULL);
                 break;
             }
 
             if (hit == 0) {
-                printf("Not in cache.\n");
-                ptr = (struct record *) (addr + sizeof(int));
-                memset(ptr, 0, sizeof(*ptr));
-                ptr->valid = 1;
-                strcpy(ptr->hostname, p->ai_canonname);
-                memcpy(&(ptr->sock), p->ai_addr, sizeof(*(p->ai_addr)));
-                memcpy(&(ptr->addr), p, sizeof(*(p)));
-                ptr->addr.ai_addr = (struct sockaddr *) &(ptr->sock);
-                ptr->addr.ai_canonname = ptr->hostname;
+                struct record  *earlist =
+                    (struct record *) (addr + sizeof(int));
+
+                for (ptr = (struct record *) (addr + sizeof(int));
+                     (char *) ptr - (char *) addr < cache_size; ptr++) {
+                    if (ptr->tv.tv_sec < earlist->tv.tv_sec) {
+                        earlist = ptr;
+                    }
+                }
+
+                memset(earlist, 0, sizeof(*earlist));
+                earlist->valid = 1;
+                strcpy(earlist->hostname, p->ai_canonname);
+                memcpy(&(earlist->sock), p->ai_addr,
+                       sizeof(*(p->ai_addr)));
+                memcpy(&(earlist->addr), p, sizeof(*(p)));
+                earlist->addr.ai_addr =
+                    (struct sockaddr *) &(earlist->sock);
+                earlist->addr.ai_canonname = earlist->hostname;
             }
         }
 
@@ -603,7 +618,7 @@ proxy(int sfd)
 }
 
 int
-main()
+main(int argc, char *argv[])
 {
     int             sfd = -1,
         newfd = -1;
@@ -611,8 +626,24 @@ main()
                    *servinfo = NULL,
         *p = NULL;
     int             optval;
-    int             fd;
+    int             fd = -1;
+    char           *config_path = NULL;
 
+    switch (argc) {
+    case 1:
+        break;
+    case 3:
+        if (strcmp(argv[1], "-f") == 0) {
+            config_path = argv[2];
+            break;
+        }
+    default:
+        return EXIT_FAILURE;
+    }
+
+    conf = config_load(config_path);
+    check(conf != NULL, "Cannot find configuration file.");
+    config_dump(conf);
 
     cache_size = NUM_RECORD * sizeof(struct record) + sizeof(int);
 
@@ -639,10 +670,6 @@ main()
     signal(SIGCHLD, SIG_IGN);
     signal(SIGINT, sigHandler);
     signal(SIGTERM, sigHandler);
-
-    conf = config_load("example.conf");
-    config_dump(conf);
-
 
     memset(&hints, 0, sizeof(hints));
     hints.ai_family = AF_UNSPEC;
