@@ -74,6 +74,14 @@ config_load(char *filename)
     }
 
     while (fgets(line, MAX_CONF_LEN, fp) != NULL) {
+        /*
+         * Skip linear white space at the beginning of the line.
+         */
+        char           *p;
+        for (p = line; *p == ' ' || *p == '\t'; p++);
+        if (p != line)
+            strcpy(line, p);
+
         if (line[0] == '#')
             continue;           /* skip lines with comment */
         if (strlen(line) <= 1)

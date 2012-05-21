@@ -42,8 +42,8 @@
 
 typedef enum { TRUE, FALSE } BOOLEAN;
 
-int             indexOf(const char *s1, const char *s2,
-                        int caseinsensitive);
+int             indexOf(const char *s1, const char *s2, const int num,
+                        const int caseinsensitive);
 
 BOOLEAN
         contains(const char *s1, const char *s2, int caseinsensitive);

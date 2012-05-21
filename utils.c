@@ -29,7 +29,8 @@
 #include "utils.h"
 
 int
-indexOf(const char *s1, const char *s2, int caseinsensitive)
+indexOf(const char *s1, const char *s2, const int num,
+        const int caseinsensitive)
 {
     int             s1_length;
     int             s2_length;
@@ -40,7 +41,7 @@ indexOf(const char *s1, const char *s2, int caseinsensitive)
     if (s1_length < s2_length)
         return -1;
 
-    for (i = 0; i <= s1_length - s2_length; i++) {
+    for (i = 0; i <= s1_length - s2_length && i < num; i++) {
         if (caseinsensitive == 1) {
             if (strncasecmp(s1 + i, s2, s2_length) == 0)
                 return i;

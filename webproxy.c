@@ -68,6 +68,10 @@
 #define HOST_PREFIX        ("Host:")
 #define HOST_PREFIX_LENGTH (strlen(HOST_PREFIX))
 
+#define HTTP_CONTINUE_MESSAGE        "HTTP/1.1 100 Continue\r\n\r\n"
+#define HTTP_CONTINUE_MESSAGE_LENGTH strlen(HTTP_CONTINUE_MESSAGE)
+
+
 struct peer {
     int             socketfd;
     char           *buffer;
@@ -468,21 +472,16 @@ proxy(int sfd)
     client->bytes_read = 0;
 
     p = conf;
+    int             largest = 0;
     while (p != NULL) {
         if (strcasecmp(p->name, "rates") == 0) {
             struct config_token *token = p->tokens;
             while (token != NULL) {
-                if (endswith(serveri->hostname, token->token, 1) == 0) {
-                    /*
-                     * printf("a hit : %d\n", atoi(token->value)); 
-                     */
+                if (endswith(serveri->hostname, token->token, 1) == 0
+                    && strlen(token->token) > largest) {
+                    largest = strlen(token->token);
                     rate = atoi(token->value);
 
-                } else {
-                    /*
-                     * printf("%s != %s\n", serveri->hostname,
-                     * token->token);
-                     */
                 }
                 token = token->next;
             }
@@ -514,7 +513,6 @@ proxy(int sfd)
         if (FD_ISSET(serveri->socketfd, &read_fds)) {
 
             tv.tv_sec = 2;
-            server_flag = 1;
 
             if (rate == -1) {
                 byte_count = recv(serveri->socketfd,
@@ -529,6 +527,12 @@ proxy(int sfd)
                   "Error when receiving data from the real server.");
             if (byte_count == 0)
                 goto cleanup;
+
+            if (byte_count == HTTP_CONTINUE_MESSAGE_LENGTH &&
+                strncasecmp(serveri->buffer, HTTP_CONTINUE_MESSAGE,
+                            HTTP_CONTINUE_MESSAGE_LENGTH) != 0) {
+                server_flag = 1;
+            }
 
             byte_count =
                 send(client->socketfd, serveri->buffer, byte_count, 0);
@@ -628,6 +632,7 @@ main(int argc, char *argv[])
     int             optval;
     int             fd = -1;
     char           *config_path = NULL;
+    char           *listen_port;
 
     switch (argc) {
     case 1:
@@ -676,7 +681,10 @@ main(int argc, char *argv[])
     hints.ai_socktype = SOCK_STREAM;
     hints.ai_flags = AI_PASSIVE;
 
-    check(getaddrinfo(NULL, "8080", &hints, &servinfo) == 0,
+    listen_port = config_get_value(conf, "default", "proxy_port", 1);
+    if (listen_port == NULL)
+        listen_port = "8080";
+    check(getaddrinfo(NULL, listen_port, &hints, &servinfo) == 0,
           "cannot getaddrinfo");
 
     optval = 1;
