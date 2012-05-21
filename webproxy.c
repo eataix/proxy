@@ -54,7 +54,10 @@
  * "If the port is empty or not given, port 80 is assumed."
  */
 #define DEFAULT_PORT ("80")
-#define NUM_RECORD (2)
+
+#define NUM_RECORD              100
+
+#define RECORD_HOSTNAME_LENGTH  30
 
 #define BUFFER_SIZE (INT16_MAX)
 #define USECOND_PER_SECOND (1000000)
@@ -73,25 +76,29 @@
 
 
 struct peer {
-    int             socketfd;
-    char           *buffer;
-    int             bytes_read;
-    char           *hostname;
+    int             socketfd;   /* Socket file descriptor */
+    char           *hostname;   /* Hostname of the peer, only set for
+                                 * "server" */
+    char           *buffer;     /* Buffer area for the incoming data */
+    int             bytes_read; /* Number of bytes read or the amount of
+                                 * data in buffer */
 };
 
 struct record {
-    int             valid;
-    char            hostname[30];
-    struct addrinfo addr;
-    struct sockaddr_storage sock;
-    struct timeval  tv;
-};
+    char            valid;      /* 1 if valid, 0 if invalid */
+    char            hostname[RECORD_HOSTNAME_LENGTH + 1];
+    struct addrinfo addr;       /* Result of addrinfo. WARNING: certain
+                                 * fields are invalid. Don't rely on this
+                                 * too much. */
+    struct sockaddr_storage sock;       /* Use sockaddr_storage to support
+                                         * IPv6 */
+    struct timeval  tv;         /* When this record was used last time */
+} __attribute__ ((__packed__));
 
-struct config_sect *conf;
+struct config_sect *conf = NULL;
 
-char           *addr;
+char           *addr = NULL;
 int             cache_size;
-
 
 /*
  * Signal handler of the parent process.
@@ -170,10 +177,14 @@ make_socket(const char *name, const char *port)
             sfd =
                 socket(ptr->addr.ai_family, ptr->addr.ai_socktype,
                        ptr->addr.ai_protocol);
-            if (sfd == -1)
-                goto error;
-            if (connect(sfd, ptr->addr.ai_addr, ptr->addr.ai_addrlen) != 0)
-                goto error;
+            if (sfd == -1) {
+                memset(ptr, 0, sizeof(*ptr));
+                goto new_record;
+            }
+            if (connect(sfd, ptr->addr.ai_addr, ptr->addr.ai_addrlen) != 0) {
+                memset(ptr, 0, sizeof(*ptr));
+                goto new_record;
+            }
             printf("Reusing dns cache%s\n", name);
             gettimeofday(&(ptr->tv), NULL);
             return sfd;
@@ -184,6 +195,7 @@ make_socket(const char *name, const char *port)
 
     printf("Have not found matched\n");
 
+  new_record:
     memset(&hints, 0, sizeof(hints));
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
@@ -212,8 +224,6 @@ make_socket(const char *name, const char *port)
             hit = 0;
             for (ptr = (struct record *) (addr + sizeof(int));
                  (char *) ptr - (char *) addr < cache_size; ptr++) {
-                printf("loop %lu %lu\n", (char *) ptr - (char *) addr,
-                       cache_size);
                 if (ptr->valid == 1) {
                     continue;
                 }
@@ -356,12 +366,14 @@ proxy(int sfd)
     int             rate;
     int             factor;
 
+    char           *data = NULL;
+
     struct timeval  current_time;
     struct timespec ts;
     time_t          prev_second;
     suseconds_t     prev_usecond;
     int             sleep_time;
-    int             server_flag;
+    int             content_flag;
 
     struct config_sect *p;
 
@@ -396,7 +408,7 @@ proxy(int sfd)
   start:
     byte_count = 0;
     rate = -1;
-    server_flag = 0;
+    content_flag = 0;
 
     FD_ZERO(&master);
     FD_SET(client->socketfd, &master);
@@ -448,7 +460,14 @@ proxy(int sfd)
             printf("host %s %s\n", serveri->hostname, hostname);
             if (serveri->socketfd == -1
                 || strcasecmp(serveri->hostname, hostname) != 0) {
+                /*
+                 * Safely close existing socket file descriptor.
+                 */
+                CLOSEFD(serveri->socketfd);
                 serveri->socketfd = make_socket(hostname, port);
+                if (serveri->socketfd == -1) {
+                    goto send_error;
+                }
                 FREEMEM(serveri->hostname);
                 serveri->hostname = strdup(hostname);
             } else {
@@ -472,7 +491,7 @@ proxy(int sfd)
     client->bytes_read = 0;
 
     p = conf;
-    int             largest = 0;
+    size_t          largest = 0;
     while (p != NULL) {
         if (strcasecmp(p->name, "rates") == 0) {
             struct config_token *token = p->tokens;
@@ -491,10 +510,11 @@ proxy(int sfd)
 
     FD_ZERO(&master);
     FD_SET(serveri->socketfd, &master);
+
     FD_SET(client->socketfd, &master);
-    fdmax =
-        serveri->socketfd >
-        client->socketfd ? serveri->socketfd : client->socketfd;
+    fdmax = max(serveri->socketfd, client->socketfd);
+
+    content_flag = 1;
 
     tv.tv_sec = 5;
     tv.tv_usec = 0;
@@ -528,10 +548,16 @@ proxy(int sfd)
             if (byte_count == 0)
                 goto cleanup;
 
+            /*
+             * If reads the "100 Continue" HTTP response message, allows the
+             * client to write.
+             */
             if (byte_count == HTTP_CONTINUE_MESSAGE_LENGTH &&
                 strncasecmp(serveri->buffer, HTTP_CONTINUE_MESSAGE,
-                            HTTP_CONTINUE_MESSAGE_LENGTH) != 0) {
-                server_flag = 1;
+                            HTTP_CONTINUE_MESSAGE_LENGTH) == 0) {
+                content_flag = 0;
+            } else {
+                content_flag = 1;
             }
 
             byte_count =
@@ -558,6 +584,7 @@ proxy(int sfd)
             }
 
             continue;
+
         } else if (FD_ISSET(client->socketfd, &read_fds)) {
             /*
              *
@@ -565,8 +592,12 @@ proxy(int sfd)
              * HTTP implementations SHOULD implement persistent
              * connections.
              *
+             * If the server has responded any HTTP response message other than
+             * 100 Continue and the client has written data, data written
+             * appears to belong to the next request/response exchange.
+             *
              */
-            if (server_flag == 1)
+            if (content_flag == 1)
                 goto start;
 
             byte_count =
@@ -605,6 +636,13 @@ proxy(int sfd)
     FREEMEM(port);
     config_destroy(conf);
     _exit(EXIT_SUCCESS);
+
+  send_error:
+    data =
+        "HTTP/1.1 503 SERVICE UNAVAILABLE\r\nContent-length: 0\r\nContent-Type: text/html; charset=utf-8\r\nServer: '; DROP TABLE servertypes; --\r\nConnection: close\r\n\r\n";
+    if (client->socketfd != -1) {
+        send(client->socketfd, data, strlen(data), 0);
+    }
 
   error:
     CLOSEFD(client->socketfd);

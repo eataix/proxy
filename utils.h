@@ -40,6 +40,8 @@
                 A = NULL;         \
         } while (0)
 
+#define max(a, b) ((a) > (b) ? (a) : (b))
+
 typedef enum { TRUE, FALSE } BOOLEAN;
 
 int             indexOf(const char *s1, const char *s2, const int num,
