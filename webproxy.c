@@ -54,6 +54,7 @@
  * "If the port is empty or not given, port 80 is assumed."
  */
 #define DEFAULT_PORT ("80")
+#define NUM_RECORD (100)
 
 #define BUFFER_SIZE (INT16_MAX)
 #define USECOND_PER_SECOND (1000000)
@@ -84,6 +85,7 @@ struct record {
 struct config_sect *conf;
 
 char           *addr;
+int             cache_size;
 
 
 /*
@@ -154,11 +156,8 @@ make_socket(const char *name, const char *port)
     }
 
     for (ptr = (struct record *) (addr + sizeof(int));
-         (char *) ptr - addr < 8804; ptr += (sizeof(*ptr))) {
-        printf("Have not found matched\n");
-        printf("the digit is %d\n", ptr->valid);
+         (char *) ptr - addr < cache_size; ptr += (sizeof(*ptr))) {
         if (ptr->valid == 0) {
-            printf("Have not found matched\n");
             break;
         }
         if (strcasecmp(ptr->hostname, name) == 0) {
@@ -202,18 +201,35 @@ make_socket(const char *name, const char *port)
             *i = 1;
         }
 
-        for (ptr = (struct record *) (addr + sizeof(int));
-             (char *) ptr - addr < 8804; ptr += sizeof(*ptr)) {
-            if (ptr->valid == 1) {
-                continue;
+        {
+            int             hit;
+            hit = 0;
+            for (ptr = (struct record *) (addr + sizeof(int));
+                 (char *) ptr - addr < cache_size; ptr += sizeof(*ptr)) {
+                if (ptr->valid == 1) {
+                    continue;
+                }
+                hit = 1;
+                ptr->valid = 1;
+                strcpy(ptr->hostname, p->ai_canonname);
+                memcpy(&(ptr->sock), p->ai_addr, sizeof(*(p->ai_addr)));
+                memcpy(&(ptr->addr), p, sizeof(*(p)));
+                ptr->addr.ai_addr = (struct sockaddr *) &(ptr->sock);
+                ptr->addr.ai_canonname = ptr->hostname;
+                break;
             }
-            ptr->valid = 1;
-            strcpy(ptr->hostname, p->ai_canonname);
-            memcpy(&(ptr->sock), p->ai_addr, sizeof(*(p->ai_addr)));
-            memcpy(&(ptr->addr), p, sizeof(*(p)));
-            ptr->addr.ai_addr = (struct sockaddr *) &(ptr->sock);
-            ptr->addr.ai_canonname = ptr->hostname;
-            break;
+
+            if (hit == 0) {
+                printf("Not in cache.\n");
+                ptr = (struct record *) (addr + sizeof(int));
+                memset(ptr, 0, sizeof(*ptr));
+                ptr->valid = 1;
+                strcpy(ptr->hostname, p->ai_canonname);
+                memcpy(&(ptr->sock), p->ai_addr, sizeof(*(p->ai_addr)));
+                memcpy(&(ptr->addr), p, sizeof(*(p)));
+                ptr->addr.ai_addr = (struct sockaddr *) &(ptr->sock);
+                ptr->addr.ai_canonname = ptr->hostname;
+            }
         }
 
         {
@@ -597,9 +613,8 @@ main()
     int             optval;
     int             fd;
 
-    int             size =
-        50 * (sizeof(struct addrinfo) + sizeof(struct sockaddr_storage)) +
-        4;
+
+    cache_size = NUM_RECORD * sizeof(struct record) + sizeof(int);
 
     fd = shm_open("dnscache", O_CREAT | O_EXCL | O_RDWR,
                   S_IRUSR | S_IWUSR);
@@ -608,13 +623,14 @@ main()
 
     printf("fd: %ld\n", (long) fd);
 
-    check(ftruncate(fd, size) != -1, "Cannot resize the object");
+    check(ftruncate(fd, cache_size) != -1, "Cannot resize the object");
 
-    addr = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    addr =
+        mmap(NULL, cache_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
 
     check(addr != MAP_FAILED, "Cannot map?!");
 
-    memset(addr, 0, size);
+    memset(addr, 0, cache_size);
 
     // memcpy(addr, str, strlen(str));
 
