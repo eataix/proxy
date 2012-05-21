@@ -36,6 +36,7 @@
 #include <fcntl.h>
 #include <ctype.h>
 #include <time.h>
+#include <assert.h>
 
 #include <sys/stat.h>
 #include <fcntl.h>              /* Defines O_* constants */
@@ -47,6 +48,13 @@
 #include "config.h"
 #include "utils.h"
 
+
+/*
+ * RFC 2616 3.2.2
+ * "If the port is empty or not given, port 80 is assumed."
+ */
+#define DEFAULT_PORT ("80")
+
 #define BUFFER_SIZE (INT16_MAX)
 #define USECOND_PER_SECOND (1000000)
 #define BYTES_TO_KBYTES(A) (A / 1024)
@@ -56,14 +64,8 @@
 #define _POSIX_C_SOURCE
 #endif
 
-#define HOST_PREFIX        ("Host: ")
+#define HOST_PREFIX        ("Host:")
 #define HOST_PREFIX_LENGTH (strlen(HOST_PREFIX))
-
-#define CHUNKED_PREFIX     ("Transfer-Encoding: chunked")
-#define CHUNKED_PREFIX_LENGTH (strlen(CHUNKED_PREFIX))
-
-#define CONTENT_LENGTH_PREFIX ("Content-Length: ")
-#define CONTENT_LENGTH_PREFIX_LENGTH (strlen(CONTENT_LENGTH_PREFIX))
 
 struct peer {
     int             socketfd;
@@ -74,7 +76,7 @@ struct peer {
 
 struct record {
     int             valid;
-    char            hostname[20];
+    char            hostname[30];
     struct addrinfo addr;
     struct sockaddr_storage sock;
 };
@@ -233,20 +235,35 @@ make_socket(const char *name, const char *port)
  * e.g., from "Host: example.com\r\n" to "example.com"
  */
 char           *
-extract_header(const char *line, const char *key)
+extract_header(const char *line, const char *key, const int prefix_length)
 {
     int             length;
     char           *header = NULL;
-    int             prefix_length;
+    const char     *ptr;
 
-    prefix_length = strlen(key);
-    length = strcspn(line, "\r\n") - prefix_length;
+    assert(strncasecmp(line, key, prefix_length) == 0);
+
+    /*
+     * RFC 2616 Section 4.2
+     *
+     * Each header field consists of a name followed by a colon (":") and the
+     * field value. Field names are case-insensitive. The field value MAY be
+     * preceded by any amount of LWS, though a single SP is preferred.
+     */
+
+    /*
+     * Skips LWS.
+     */
+    for (ptr = line + prefix_length; *ptr == ' ' || *ptr == '\t'; ptr++);
+
+    length = strcspn(ptr, "\r\n");
 
     header = malloc(length + 1);
     check(header != NULL, "Cannot allocate memory to extra");
 
     *header = '\0';
-    strncat(header, line + prefix_length, length);
+    strncat(header, ptr, length);
+    printf("key: %s, value: %s\n", key, header);
 
     return header;
 
@@ -257,6 +274,8 @@ extract_header(const char *line, const char *key)
 /*
  * Parses the Host field of HTTP request header.
  * e.g., "Host: example.com:8080" to hostname = example.com & port = 8080.
+ *
+ * If cannot find port, use "80".
  */
 void
 parsehostname(const char *raw_hostname, char *hostname, char *port)
@@ -267,11 +286,11 @@ parsehostname(const char *raw_hostname, char *hostname, char *port)
 
     if ((p = strtok(newstr, ":")) == NULL) {
         strcpy(hostname, newstr);
-        strcpy(port, "http");
+        strcpy(port, DEFAULT_PORT);
     } else {
         strcpy(hostname, p);
         if ((p = strtok(NULL, ":")) == NULL) {
-            strcpy(port, "http");
+            strcpy(port, DEFAULT_PORT);
         } else {
             strcpy(port, p);
         }
@@ -369,19 +388,26 @@ proxy(int sfd)
             goto cleanup;
 
         /*
+         * RFC 2616 Section 5.1.2
+         *
+         * The absoluteURI form is REQUIRED when the request is being made to a
+         * proxy.
+         *
          * To allow for transition to absoluteURIs in all requests in future
          * versions of HTTP, all HTTP/1.1 servers MUST accept the absoluteURI
          * form in requests, even though HTTP/1.1 clients will only generate
          * them in requests to proxies.
+         *
          */
-        if (strncmp
+        if (strncasecmp
             (client->buffer + client->bytes_read, HOST_PREFIX,
              HOST_PREFIX_LENGTH) == 0) {
             printf("host %s %s\n", serveri->hostname, hostname);
             FREEMEM(raw_hostname);
             raw_hostname =
                 extract_header(client->buffer + client->bytes_read,
-                               HOST_PREFIX);
+                               HOST_PREFIX, HOST_PREFIX_LENGTH);
+            check(raw_hostname != NULL, "The header is malformed");
             parsehostname(raw_hostname, hostname, port);
             printf("host: %s port: %s\n", hostname, port);
             printf("host %s %s\n", serveri->hostname, hostname);
@@ -396,6 +422,7 @@ proxy(int sfd)
                            serveri->hostname, hostname);
             }
         }
+
         client->bytes_read += byte_count;
 
         if (byte_count == 2) {
@@ -466,6 +493,7 @@ proxy(int sfd)
                                   serveri->buffer,
                                   KBYTES_TO_BYTES(rate), 0);
             }
+
             check(byte_count != -1,
                   "Error when receiving data from the real server.");
             if (byte_count == 0)
@@ -496,6 +524,13 @@ proxy(int sfd)
 
             continue;
         } else if (FD_ISSET(client->socketfd, &read_fds)) {
+            /*
+             *
+             * RFC 2616 Section 8.1.1
+             * HTTP implementations SHOULD implement persistent
+             * connections.
+             *
+             */
             if (server_flag == 1)
                 goto start;
 
