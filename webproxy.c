@@ -255,61 +255,6 @@ extract_header(const char *line, const char *key)
 }
 
 /*
- * Converts the absolute URI to relative URI according to RFC2616.
- * e.g., from "GET http://example.com HTTP/1.1"
- *         to "GET / HTTP/1.1"
- */
-int
-process(char *str, const int str_len)
-{
-    const char     *prefix = "http://";
-    const int       prefix_length = strlen(prefix);
-
-    char           *p = NULL;
-    int             i,
-                    j;
-
-    p = malloc(str_len + 1);
-    check(p != NULL, "Cannot allocate memory.");
-    memset(p, 0, sizeof *p);
-    memcpy(p, str, str_len);
-
-    for (i = 0, j = 0; i < str_len && j < str_len; i++, j++) {
-        /*
-         * If find "http://", skip copying until found "/" or " " (space).
-         */
-        if (strncasecmp(p + j, prefix, prefix_length) == 0) {
-            for (j += prefix_length;; j++) {
-                if (p[j] == '/') {
-                    break;
-                }
-                /*
-                 * RFC2616 5.1.2. Request-URI
-                 * ...if none is present in the original URI, it MUST be given as
-                 * "/" (the server root).
-                 */
-                if (p[j] == ' ') {
-                    str[i] = '/';
-                    i++;
-                    break;
-                }
-            }
-        }
-        /*
-         * Resume copying
-         */
-        str[i] = p[j];
-    }
-
-    free(p);
-    return i;
-
-  error:
-    free(p);
-    return -1;
-}
-
-/*
  * Parses the Host field of HTTP request header.
  * e.g., "Host: example.com:8080" to hostname = example.com & port = 8080.
  */
@@ -347,7 +292,6 @@ proxy(int sfd)
                     read_fds;
     int             fdmax;
 
-    int             line_count;
     int             byte_count;
 
     char           *raw_hostname = NULL,
@@ -363,7 +307,7 @@ proxy(int sfd)
     time_t          prev_second;
     suseconds_t     prev_usecond;
     int             sleep_time;
-    int             content_flag;
+    int             server_flag;
 
     struct config_sect *p;
 
@@ -396,10 +340,9 @@ proxy(int sfd)
     memset(port, 0, sizeof(*port));
 
   start:
-    line_count = 0;
     byte_count = 0;
     rate = -1;
-    content_flag = 0;
+    server_flag = 0;
 
     FD_ZERO(&master);
     FD_SET(client->socketfd, &master);
@@ -425,19 +368,12 @@ proxy(int sfd)
             if (byte_count == 0)
             goto cleanup;
 
-        line_count++;
-
-        if (line_count == 1) {
-            int             i;
-            printf("%ld is: ", (long) getpid());
-            for (i = 0; i < byte_count; i++) {
-                putchar(*(client->buffer + client->bytes_read + i));
-            }
-
-            byte_count =
-                process(client->buffer + client->bytes_read, byte_count);
-        }
-
+        /*
+         * To allow for transition to absoluteURIs in all requests in future
+         * versions of HTTP, all HTTP/1.1 servers MUST accept the absoluteURI
+         * form in requests, even though HTTP/1.1 clients will only generate
+         * them in requests to proxies.
+         */
         if (strncmp
             (client->buffer + client->bytes_read, HOST_PREFIX,
              HOST_PREFIX_LENGTH) == 0) {
@@ -459,19 +395,7 @@ proxy(int sfd)
                     printf("%ld is reusing: %s %s", (long) getpid(),
                            serveri->hostname, hostname);
             }
-        } else
-            if (strncmp
-                (client->buffer + client->bytes_read, CHUNKED_PREFIX,
-                 CHUNKED_PREFIX_LENGTH) == 0) {
-            content_flag = 1;
-        } else
-            if (strncmp
-                (client->buffer + client->bytes_read,
-                 CONTENT_LENGTH_PREFIX,
-                 CONTENT_LENGTH_PREFIX_LENGTH) == 0) {
-            content_flag = 1;
         }
-
         client->bytes_read += byte_count;
 
         if (byte_count == 2) {
@@ -509,45 +433,6 @@ proxy(int sfd)
     }
 
     FD_ZERO(&master);
-    FD_SET(client->socketfd, &master);
-    fdmax = client->socketfd;
-
-    if (content_flag == 0) {
-        printf("No content skip to response.\n");
-        goto read_response;
-    }
-
-    tv.tv_sec = 1;
-    tv.tv_usec = 0;
-
-    for (;;) {
-        read_fds = master;
-
-        check(select(fdmax + 1, &read_fds, NULL, NULL, &tv) != -1,
-              "Cannot select.");
-
-        if (FD_ISSET(client->socketfd, &read_fds)) {
-            byte_count = recv(client->socketfd, client->buffer, 1024, 0);
-            check(byte_count != -1,
-                  "Error when receiving data from the client.");
-            if (byte_count == 0)
-                goto cleanup;
-
-            byte_count =
-                send(serveri->socketfd, client->buffer, byte_count, 0);
-            check(byte_count != -1,
-                  "Error when sending data to the server.");
-            if (byte_count == 0)
-                goto cleanup;
-
-            continue;
-        } else {
-            break;
-        }
-    }
-
-  read_response:
-    FD_ZERO(&master);
     FD_SET(serveri->socketfd, &master);
     FD_SET(client->socketfd, &master);
     fdmax =
@@ -571,6 +456,7 @@ proxy(int sfd)
         if (FD_ISSET(serveri->socketfd, &read_fds)) {
 
             tv.tv_sec = 2;
+            server_flag = 1;
 
             if (rate == -1) {
                 byte_count = recv(serveri->socketfd,
@@ -610,8 +496,25 @@ proxy(int sfd)
 
             continue;
         } else if (FD_ISSET(client->socketfd, &read_fds)) {
-            line_count = 0;
-            goto start;
+            if (server_flag == 1)
+                goto start;
+
+            byte_count =
+                recv(client->socketfd, client->buffer, KBYTES_TO_BYTES(2),
+                     0);
+            check(byte_count != -1,
+                  "Error when receiving data from the client.");
+            if (byte_count == 0)
+                goto cleanup;
+
+            byte_count =
+                send(serveri->socketfd, client->buffer, byte_count, 0);
+            check(byte_count != -1,
+                  "Error when sending data to the server.");
+            if (byte_count == 0)
+                goto cleanup;
+
+            continue;
         } else {
             break;
         }
