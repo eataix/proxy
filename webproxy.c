@@ -148,6 +148,35 @@ childSigHandler(int sig)
     }
 }
 
+int
+send_error(int sfd, const int code)
+{
+    char           *tail = "Content-length: 0\r\n"
+        "Content-Type: text/html; charset=utf-8\r\n"
+        "Server: '; DROP TABLE servertypes; --\r\n"
+        "Connection: close\r\n\r\n";
+    char           *head,
+                   *data;
+    switch (code) {
+    case 503:
+        head = "HTTP/1.1 503 SERVICE UNAVAILABLE\r\n";
+        break;
+    case 400:
+    default:
+        head = "HTTP/1.1 400 BAD REQUEST\r\n";
+        break;
+    }
+
+    data = malloc(strlen(tail) + strlen(head) + 10);
+
+    snprintf(data, sizeof(data), "%s%s", head, tail);
+    if (sfd != -1) {
+        return send(sfd, data, strlen(data), 0);
+    } else {
+        return -1;
+    }
+}
+
 /*
  * Establishes a connection with the really server.
  * Returns the socket file descriptor with the server.
@@ -381,17 +410,20 @@ proxy(int sfd)
                     read_fds;
     int             fdmax;
 
-    int             byte_count;
+    int             byte_count,
+                    line_count;
 
     char           *raw_hostname = NULL,
         *hostname = NULL,
         *port = NULL;
 
+    char           *request_hostname = NULL,
+        *request_port = NULL;
+
     struct timeval  tv;
     int             rate;
     int             factor;
 
-    char           *data = NULL;
 
     struct timeval  current_time;
     struct timespec ts;
@@ -424,14 +456,24 @@ proxy(int sfd)
 
     hostname = malloc(200);
     check(hostname != NULL, "Cannot allocate memory.");
-    memset(hostname, 0, sizeof(*hostname));
 
     port = malloc(20);
     check(port != NULL, "Cannot allocate memory.");
-    memset(port, 0, sizeof(*port));
+
+    request_hostname = malloc(200);
+    check(request_hostname != NULL, "Cannot allocate memory");
+
+    request_port = malloc(200);
+    check(request_port != NULL, "Cannot allocate memory");
 
   start:
+    memset(hostname, 0, sizeof(*hostname));
+    memset(port, 0, sizeof(*port));
+    memset(request_hostname, 0, sizeof(*request_hostname));
+    memset(request_port, 0, sizeof(*request_port));
+
     byte_count = 0;
+    line_count = 0;
     rate = -1;
     content_flag = 0;
 
@@ -454,10 +496,36 @@ proxy(int sfd)
             readLine(client->socketfd, client->buffer + client->bytes_read,
                      KBYTES_TO_BYTES(2));
 
-        check(byte_count != -1, "Cannot read.")
+        check(byte_count != -1, "Cannot read.");
 
-            if (byte_count == 0)
+        if (byte_count == 0)
             goto cleanup;
+
+
+        if (line_count == 0) {
+            char           *p = client->buffer + client->bytes_read;
+
+            while (p - (client->buffer + client->bytes_read) < byte_count) {
+                putchar(*p);;;
+                p++;
+            }
+            byte_count =
+                process_request_line(request_hostname, request_port,
+                                     client->buffer + client->bytes_read,
+                                     byte_count);
+
+            while (p - (client->buffer + client->bytes_read) < byte_count) {
+                putchar(*p);;;
+                p++;
+            }
+            printf("%d, hostname: %s, port: %s\n", byte_count,
+                   request_hostname, request_port);
+            if (byte_count == -1) {
+                send_error(client->socketfd, 400);
+                goto error;
+            }
+            line_count = 1;
+        }
 
         /*
          * RFC 2616 Section 5.1.2
@@ -483,6 +551,10 @@ proxy(int sfd)
             parsehostname(raw_hostname, hostname, port);
             printf("host: %s port: %s\n", hostname, port);
             printf("host %s %s\n", serveri->hostname, hostname);
+            check(strcasecmp(request_hostname, hostname) == 0,
+                  "The URL specified");
+            check(strcasecmp(request_port, port) == 0,
+                  "The URL specified");
             if (serveri->socketfd == -1
                 || strcasecmp(serveri->hostname, hostname) != 0) {
                 /*
@@ -491,7 +563,8 @@ proxy(int sfd)
                 CLOSEFD(serveri->socketfd);
                 serveri->socketfd = make_socket(hostname, port);
                 if (serveri->socketfd == -1) {
-                    goto send_error;
+                    send_error(client->socketfd, 503);
+                    goto error;
                 }
                 FREEMEM(serveri->hostname);
                 serveri->hostname = strdup(hostname);
@@ -662,14 +735,8 @@ proxy(int sfd)
     config_destroy(conf);
     _exit(EXIT_SUCCESS);
 
-  send_error:
-    data =
-        "HTTP/1.1 503 SERVICE UNAVAILABLE\r\nContent-length: 0\r\nContent-Type: text/html; charset=utf-8\r\nServer: '; DROP TABLE servertypes; --\r\nConnection: close\r\n\r\n";
-    if (client->socketfd != -1) {
-        send(client->socketfd, data, strlen(data), 0);
-    }
-
   error:
+    send_error(client->socketfd, 503);
     CLOSEFD(client->socketfd);
     CLOSEFD(serveri->socketfd);
     FREEMEM(serveri->hostname);

@@ -26,7 +26,11 @@
  */
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 #include "utils.h"
+#include <stdio.h>
+
+#define HTTP_SCHEME_PREFIX "http://"
 
 int
 indexOf(const char *s1, const char *s2, const int num,
@@ -52,6 +56,86 @@ indexOf(const char *s1, const char *s2, const int num,
     }
 
     return -1;
+}
+
+int
+process_request_line(char *hostname, char *port, char *buffer,
+                     const int count)
+{
+    char           *p,
+                   *b,
+                   *hn,
+                   *pp;
+
+    for (p = buffer, b = buffer; *p != ' ' && b - buffer < count;
+         p++, b++);
+
+    if (b - buffer >= count)
+        return -1;
+
+    *b = *p;
+    p++;
+    b++;
+
+    if (!isalnum(*p) && *p != '*') {
+        printf("not *");
+        return -1;
+    }
+
+    /*
+     * RFC 2616 Section 3.2.2
+     * Comparisons of scheme names MUST be case-insensitive;
+     */
+    if (strncasecmp(b, HTTP_SCHEME_PREFIX, strlen(HTTP_SCHEME_PREFIX)) !=
+        0) {
+        return -1;
+    }
+
+    p += strlen(HTTP_SCHEME_PREFIX);
+
+    hn = hostname;
+    pp = port;
+
+    while (*p != '/' && *p != ' ') {
+        if (*p == ':') {
+            while (*p != '/' && *p != ' ') {
+                *pp = *p;
+                pp++;
+                p++;
+            }
+            break;
+        }
+        *hn = *p;
+        hn++;
+        p++;
+    }
+
+    if (*p == ' ') {
+        *b = '/';
+        b++;
+    }
+
+    do {
+        *b = *p;
+        b++;
+        p++;
+    } while (*b != '\n' && *(b - 1) != '\r');
+
+    if (hn - hostname == 0) {
+        return -1;
+    }
+
+    hn++;
+    *hn = '\0';
+
+    if (pp - port == 0) {
+        strcpy(pp, "80");
+    } else {
+        pp++;
+        *pp = '\0';
+    }
+
+    return b - buffer + 1;
 }
 
 int
