@@ -96,7 +96,9 @@ struct record {
     struct sockaddr_storage sock;       /* Use sockaddr_storage to support
                                          * IPv6 */
     struct timeval  tv;         /* When this record was used last time */
-} __attribute__ ((__packed__));
+    struct record  *next;
+    struct record  *prev;
+};
 
 struct config_sect *conf = NULL;
 
@@ -163,34 +165,60 @@ make_socket(const char *name, const char *port)
     printf("%ld Prepare to connect to host: %s port:%s\n", (long) getpid(),
            name, port);
     sem_wait(sem);
-    printf("%ld is unblocked\n", getpid());
 
-    for (ptr = (struct record *) addr;
-         (char *) ptr - (char *) addr < cache_size; ptr++) {
+    if ((ptr = *((struct record **) addr)) == NULL) {
+        goto new_record;
+    }
 
-        if (ptr->valid == 0)    // End of record.
-            break;
-
+    int             i = 1;
+    do {
+        printf("loop %d\n", i);
         if (strcasecmp(ptr->hostname, name) == 0) {
             sfd =
                 socket(ptr->addr.ai_family, ptr->addr.ai_socktype,
                        ptr->addr.ai_protocol);
+
             if (sfd == -1) {
                 memset(ptr, 0, sizeof(*ptr));
                 goto new_record;
             }
+
             if (connect(sfd, ptr->addr.ai_addr, ptr->addr.ai_addrlen) != 0) {
                 memset(ptr, 0, sizeof(*ptr));
                 goto new_record;
             }
+
             printf("Reusing dns cache%s\n", name);
             gettimeofday(&(ptr->tv), NULL);
+
+            /*
+             * If this record is in the middle of the linked list, make it the
+             * first record of the linked list.
+             */
+            if (ptr->prev != NULL) {
+                /*
+                 * Isolate it.
+                 */
+                ptr->prev->next = ptr->next;
+
+                if (ptr->next != NULL)
+                    ptr->next->prev = ptr->prev;
+                /*
+                 * Make it the first element.
+                 */
+                ptr->next = *((struct record **) addr);
+                *((struct record **) addr) = ptr;
+                ptr->prev = NULL;
+            }
+
             sem_post(sem);
+
             return sfd;
-        } else {
-            printf("cache has: %s\n", ptr->hostname);
         }
-    }
+
+        ptr = ptr->next;
+
+    } while (ptr != NULL);
 
     printf("Have not found matched\n");
 
@@ -212,49 +240,58 @@ make_socket(const char *name, const char *port)
 
         printf("Connected to %s\n", p->ai_canonname);
 
-        {
-            int             hit;
-            hit = 0;
-            for (ptr = (struct record *) addr;
-                 (char *) ptr - (char *) addr < cache_size; ptr++) {
-                if (ptr->valid == 1) {
-                    continue;
-                }
-                hit = 1;
-                ptr->valid = 1;
-                strcpy(ptr->hostname, p->ai_canonname);
-                memcpy(&(ptr->sock), p->ai_addr, sizeof(*(p->ai_addr)));
-                memcpy(&(ptr->addr), p, sizeof(*p));
-                ptr->addr.ai_addr = (struct sockaddr *) &(ptr->sock);
-                ptr->addr.ai_canonname = ptr->hostname;
-                gettimeofday(&(ptr->tv), NULL);
+
+        for (ptr = (struct record *) (addr + sizeof(struct record *));
+             (char *) ptr - (char *) addr < cache_size; ptr++) {
+            if (ptr->valid == 0)
                 break;
-            }
-
-            if (hit == 0) {
-                struct record  *earlist = (struct record *) addr;
-
-                for (ptr = (struct record *) addr;
-                     (char *) ptr - (char *) addr < cache_size; ptr++) {
-                    if (ptr->tv.tv_sec < earlist->tv.tv_sec) {
-                        earlist = ptr;
-                    }
-                }
-
-                memset(earlist, 0, sizeof(*earlist));
-                earlist->valid = 1;
-                strcpy(earlist->hostname, p->ai_canonname);
-                memcpy(&(earlist->sock), p->ai_addr,
-                       sizeof(*(p->ai_addr)));
-                memcpy(&(earlist->addr), p, sizeof(*(p)));
-                earlist->addr.ai_addr =
-                    (struct sockaddr *) &(earlist->sock);
-                earlist->addr.ai_canonname = earlist->hostname;
-            }
         }
+
+        if ((char *) ptr - addr > cache_size) {
+            struct record  *earlist =
+                (struct record *) (addr + sizeof(struct record *));
+
+            for (ptr = (struct record *) (addr + sizeof(struct record *));
+                 (char *) ptr - (char *) addr < cache_size; ptr++) {
+                if (ptr->tv.tv_sec < earlist->tv.tv_sec) {
+                    earlist = ptr;
+                }
+            }
+            ptr = earlist;
+        }
+
+        if (ptr->valid == 1) {
+            memset(ptr, 0, sizeof(*ptr));
+        }
+
+
+        ptr->valid = 1;
+        strcpy(ptr->hostname, p->ai_canonname);
+        memcpy(&(ptr->sock), p->ai_addr, sizeof(*(p->ai_addr)));
+        memcpy(&(ptr->addr), p, sizeof(*p));
+        ptr->addr.ai_addr = (struct sockaddr *) &(ptr->sock);
+        ptr->addr.ai_canonname = ptr->hostname;
+
+        printf("hit\n");
+        ptr->next = *((struct record **) addr);
+        *((struct record **) addr) = ptr;
+
+        printf("hit\n");
+
+        ptr->prev = NULL;
+
+        printf("hit\n");
+
+        if (ptr->next != NULL)
+            ptr->next->prev = ptr;
+
+        printf("hit\n");
+
+        gettimeofday(&(ptr->tv), NULL);
 
         freeaddrinfo(ai);
         sem_post(sem);
+        printf("finish the linked list\n");
         return sfd;
     }
 
@@ -676,14 +713,12 @@ main(int argc, char *argv[])
     check(conf != NULL, "Cannot find configuration file.");
     config_dump(conf);
 
-    cache_size = NUM_RECORD * sizeof(struct record);
+    cache_size =
+        NUM_RECORD * sizeof(struct record) + sizeof(struct record *);
 
     fd = shm_open("dnscache", O_CREAT | O_EXCL | O_RDWR,
                   S_IRUSR | S_IWUSR);
-
     check(fd != -1, "Cannot create shared memory.");
-
-    printf("fd: %ld\n", (long) fd);
 
     check(ftruncate(fd, cache_size) != -1, "Cannot resize the object");
 
@@ -691,9 +726,10 @@ main(int argc, char *argv[])
         mmap(NULL, cache_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
     check(addr != MAP_FAILED, "Cannot map?!");
 
+    *((struct record **) addr) = NULL;
+
     sem = sem_open("dnscachesem", O_CREAT | O_EXCL, S_IRUSR | S_IWUSR, 1);
     check(sem != SEM_FAILED, "Cannot create semaphores.");
-
     memset(addr, 0, cache_size);
 
     setbuf(stdout, NULL);
