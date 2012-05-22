@@ -124,7 +124,6 @@ sigHandler(int sig)
         exit(EXIT_SUCCESS);
     }
 }
-
 /*
  * Signal handler of the child process.
  */
@@ -164,11 +163,10 @@ send_error(int sfd, const int code)
         break;
     }
 
-    data = malloc(strlen(tail) + strlen(head) + 10);
-
-    snprintf(data, sizeof(data), "%s%s", head, tail);
+    puts(head);
     if (sfd != -1) {
-        return send(sfd, data, strlen(data), 0);
+        send(sfd, head, strlen(head), 0);
+        send(sfd, tail, strlen(tail), 0);
     } else {
         return -1;
     }
@@ -578,6 +576,7 @@ proxy(int sfd)
                 CLOSEFD(serveri->socketfd);
                 serveri->socketfd = make_socket(hostname, port);
                 if (serveri->socketfd == -1) {
+                        printf("cannot connect to the server\n");
                     send_error(client->socketfd, 503);
                     goto error;
                 }
@@ -752,7 +751,6 @@ proxy(int sfd)
     _exit(EXIT_SUCCESS);
 
   error:
-    send_error(client->socketfd, 503);
     CLOSEFD(client->socketfd);
     CLOSEFD(serveri->socketfd);
     FREEMEM(serveri->hostname);
