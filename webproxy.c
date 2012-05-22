@@ -93,8 +93,6 @@ struct record {
     struct sockaddr_storage sock;       /* Use sockaddr_storage to support
                                          * IPv6 */
     struct timeval  tv;         /* When this record was used last time */
-    struct record  *next;
-    struct record  *prev;
 };
 
 struct config_sect *conf = NULL;
@@ -124,6 +122,21 @@ sigHandler(int sig)
         exit(EXIT_SUCCESS);
     }
 }
+
+unsigned long
+hash(const unsigned char *str)
+{
+    const unsigned char *p;
+    unsigned long   hash = 5381;
+    int             c;
+    p = str;
+
+    while ((c = *str++))
+        hash = ((hash << 5) + hash) + c;
+
+    return hash;
+}
+
 /*
  * Signal handler of the child process.
  */
@@ -151,8 +164,7 @@ send_error(int sfd, const int code)
         "Content-Type: text/html; charset=utf-8\r\n"
         "Server: '; DROP TABLE servertypes; --\r\n"
         "Connection: close\r\n\r\n";
-    char           *head,
-                   *data;
+    char           *head;
     switch (code) {
     case 503:
         head = "HTTP/1.1 503 SERVICE UNAVAILABLE\r\n";
@@ -167,6 +179,7 @@ send_error(int sfd, const int code)
     if (sfd != -1) {
         send(sfd, head, strlen(head), 0);
         send(sfd, tail, strlen(tail), 0);
+        return 1;
     } else {
         return -1;
     }
@@ -186,71 +199,47 @@ make_socket(const char *name, const char *port)
     int             sfd = -1;
     struct record  *ptr;
     pid_t           pid;
+    int             index,
+                    start;
 
     printf("%ld Prepare to connect to host: %s port:%s\n", (long) getpid(),
            name, port);
+
+    ptr = (struct record *) addr;
+    start = hash((unsigned char *) name);
+    index = start;
+    ptr += start;
+
     sem_wait(sem);
+    if (strcasecmp(ptr->hostname, name) == 0) {
+        sfd =
+            socket(ptr->addr.ai_family, ptr->addr.ai_socktype,
+                   ptr->addr.ai_protocol);
 
-    if ((ptr = *((struct record **) addr)) == NULL) {
-        goto new_record;
-    }
-
-    int             i = 1;
-    do {
-        printf("loop %d\n", i);
-        if (strcasecmp(ptr->hostname, name) == 0) {
-            sfd =
-                socket(ptr->addr.ai_family, ptr->addr.ai_socktype,
-                       ptr->addr.ai_protocol);
-
-            if (sfd == -1) {
-                memset(ptr, 0, sizeof(*ptr));
-                goto new_record;
-            }
-
-            if (connect(sfd, ptr->addr.ai_addr, ptr->addr.ai_addrlen) != 0) {
-                memset(ptr, 0, sizeof(*ptr));
-                goto new_record;
-            }
-
-            printf("Reusing dns cache%s\n", name);
-            gettimeofday(&(ptr->tv), NULL);
-
-            pid = fork();
-            check(pid != -1, "Cannot fork...");
-            switch (pid) {
-            case 0:
-                /*
-                 * If this record is in the middle of the linked
-                 * list, make it the first record of the linked
-                 * list.
-                 */
-                if (ptr->prev != NULL) {
-                    /*
-                     * Isolate it.
-                     */
-                    ptr->prev->next = ptr->next;
-
-                    if (ptr->next != NULL)
-                        ptr->next->prev = ptr->prev;
-                    /*
-                     * Make it the first element.
-                     */
-                    ptr->next = *((struct record **) addr);
-                    *((struct record **) addr) = ptr;
-                    ptr->prev = NULL;
-                }
-
-                sem_post(sem);
-                _exit(EXIT_SUCCESS);
-            default:
-                return sfd;
-            }
+        if (sfd == -1) {
+            memset(ptr, 0, sizeof(*ptr));
+            goto new_record;
         }
 
-        ptr = ptr->next;
+        if (connect(sfd, ptr->addr.ai_addr, ptr->addr.ai_addrlen) != 0) {
+            memset(ptr, 0, sizeof(*ptr));
+            goto new_record;
+        }
 
-    } while (ptr != NULL);
+        printf("Reusing dns cache%s\n", name);
+        gettimeofday(&(ptr->tv), NULL);
+
+        pid = fork();
+        check(pid != -1, "Cannot fork...");
+        switch (pid) {
+        case 0:
+            sem_post(sem);
+            _exit(EXIT_SUCCESS);
+        default:
+            return sfd;
+        }
+    }
+    sem_post(sem);
 
     printf("Have not found matched\n");
 
@@ -277,32 +266,12 @@ make_socket(const char *name, const char *port)
 
         switch (pid) {
         case 0:
+            sem_wait(sem);
+            start = hash((unsigned char *) name);
+            ptr = (struct record *) addr;
+            ptr += start;
 
-            for (ptr =
-                 (struct record *) (addr + sizeof(struct record *));
-                 (char *) ptr - (char *) addr < cache_size; ptr++) {
-                if (ptr->valid == 0)
-                    break;
-            }
-
-            if ((char *) ptr - addr > cache_size) {
-                struct record  *earlist =
-                    (struct record *) (addr + sizeof(struct record *));
-
-                for (ptr =
-                     (struct record *) (addr +
-                                        sizeof(struct record *));
-                     (char *) ptr - (char *) addr < cache_size; ptr++) {
-                    if (ptr->tv.tv_sec < earlist->tv.tv_sec) {
-                        earlist = ptr;
-                    }
-                }
-                ptr = earlist;
-            }
-
-            if (ptr->valid == 1) {
-                memset(ptr, 0, sizeof(*ptr));
-            }
+            memset(ptr, 0, sizeof(*ptr));
 
             ptr->valid = 1;
             strcpy(ptr->hostname, p->ai_canonname);
@@ -311,24 +280,11 @@ make_socket(const char *name, const char *port)
             ptr->addr.ai_addr = (struct sockaddr *) &(ptr->sock);
             ptr->addr.ai_canonname = ptr->hostname;
 
-            printf("hit\n");
-            ptr->next = *((struct record **) addr);
-            *((struct record **) addr) = ptr;
-
-            printf("hit\n");
-
-            ptr->prev = NULL;
-
-            printf("hit\n");
-
-            if (ptr->next != NULL)
-                ptr->next->prev = ptr;
-
-            printf("hit\n");
 
             gettimeofday(&(ptr->tv), NULL);
 
             freeaddrinfo(ai);
+
             sem_post(sem);
             printf("finish the linked list\n");
             _exit(EXIT_SUCCESS);
@@ -485,7 +441,7 @@ proxy(int sfd)
     memset(request_port, 0, sizeof(*request_port));
 
     byte_count = 0;
-    line_count = 0;
+    line_count = 1;
     rate = -1;
     content_flag = 0;
 
@@ -563,11 +519,13 @@ proxy(int sfd)
             parsehostname(raw_hostname, hostname, port);
             printf("host: %s port: %s\n", hostname, port);
             printf("host %s %s\n", serveri->hostname, hostname);
-            check(strcasecmp(request_hostname, hostname) == 0,
-                  "The URL specified %s != %s", request_hostname,
-                  hostname);
-            check(strcasecmp(request_port, port) == 0,
-                  "The URL specified %s != %s", request_port, port);
+            if (line_count == 0) {
+                check(strcasecmp(request_hostname, hostname) == 0,
+                      "The URL specified %s != %s", request_hostname,
+                      hostname);
+                check(strcasecmp(request_port, port) == 0,
+                      "The URL specified %s != %s", request_port, port);
+            }
             if (serveri->socketfd == -1
                 || strcasecmp(serveri->hostname, hostname) != 0) {
                 /*
@@ -576,7 +534,7 @@ proxy(int sfd)
                 CLOSEFD(serveri->socketfd);
                 serveri->socketfd = make_socket(hostname, port);
                 if (serveri->socketfd == -1) {
-                        printf("cannot connect to the server\n");
+                    printf("cannot connect to the server\n");
                     send_error(client->socketfd, 503);
                     goto error;
                 }
