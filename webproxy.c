@@ -43,14 +43,12 @@
 #include <sys/stat.h>           /* Defines mode constants */
 #include <sys/mman.h>
 
-
 #include <semaphore.h>
 
 #include "dbg.h"
 #include "readline.h"
 #include "config.h"
 #include "utils.h"
-
 
 /*
  * RFC 2616 3.2.2
@@ -76,7 +74,6 @@
 
 #define HTTP_CONTINUE_MESSAGE        "HTTP/1.1 100 Continue\r\n\r\n"
 #define HTTP_CONTINUE_MESSAGE_LENGTH strlen(HTTP_CONTINUE_MESSAGE)
-
 
 struct peer {
     int             socketfd;   /* Socket file descriptor */
@@ -139,11 +136,11 @@ childSigHandler(int sig)
          * Clean up.
          */
         printf("%d is going to terminate\n", getpid());
-        /****************************** WARNING ****************************
-         * The child process uses _exit(2) to terminate. The resources
-         * may not be fully released. Its parent should use exit(2) to
-         * terminate and releases the resources (e.g., file descriptors).
-         ******************************************************************/
+                /****************************** WARNING ****************************
+                 * The child process uses _exit(2) to terminate. The resources
+                 * may not be fully released. Its parent should use exit(2) to
+                 * terminate and releases the resources (e.g., file descriptors).
+                 ******************************************************************/
         _exit(0);
     }
 }
@@ -190,6 +187,7 @@ make_socket(const char *name, const char *port)
                    *p;
     int             sfd = -1;
     struct record  *ptr;
+    pid_t           pid;
 
     printf("%ld Prepare to connect to host: %s port:%s\n", (long) getpid(),
            name, port);
@@ -220,29 +218,36 @@ make_socket(const char *name, const char *port)
             printf("Reusing dns cache%s\n", name);
             gettimeofday(&(ptr->tv), NULL);
 
-            /*
-             * If this record is in the middle of the linked list, make it the
-             * first record of the linked list.
-             */
-            if (ptr->prev != NULL) {
+            pid = fork();
+            check(pid != -1, "Cannot fork...");
+            switch (pid) {
+            case 0:
                 /*
-                 * Isolate it.
+                 * If this record is in the middle of the linked
+                 * list, make it the first record of the linked
+                 * list.
                  */
-                ptr->prev->next = ptr->next;
+                if (ptr->prev != NULL) {
+                    /*
+                     * Isolate it.
+                     */
+                    ptr->prev->next = ptr->next;
 
-                if (ptr->next != NULL)
-                    ptr->next->prev = ptr->prev;
-                /*
-                 * Make it the first element.
-                 */
-                ptr->next = *((struct record **) addr);
-                *((struct record **) addr) = ptr;
-                ptr->prev = NULL;
+                    if (ptr->next != NULL)
+                        ptr->next->prev = ptr->prev;
+                    /*
+                     * Make it the first element.
+                     */
+                    ptr->next = *((struct record **) addr);
+                    *((struct record **) addr) = ptr;
+                    ptr->prev = NULL;
+                }
+
+                sem_post(sem);
+                _exit(EXIT_SUCCESS);
+            default:
+                return sfd;
             }
-
-            sem_post(sem);
-
-            return sfd;
         }
 
         ptr = ptr->next;
@@ -269,59 +274,69 @@ make_socket(const char *name, const char *port)
 
         printf("Connected to %s\n", p->ai_canonname);
 
+        pid = fork();
+        check(pid != -1, "Cannot fork");
 
-        for (ptr = (struct record *) (addr + sizeof(struct record *));
-             (char *) ptr - (char *) addr < cache_size; ptr++) {
-            if (ptr->valid == 0)
-                break;
-        }
+        switch (pid) {
+        case 0:
 
-        if ((char *) ptr - addr > cache_size) {
-            struct record  *earlist =
-                (struct record *) (addr + sizeof(struct record *));
-
-            for (ptr = (struct record *) (addr + sizeof(struct record *));
+            for (ptr =
+                 (struct record *) (addr + sizeof(struct record *));
                  (char *) ptr - (char *) addr < cache_size; ptr++) {
-                if (ptr->tv.tv_sec < earlist->tv.tv_sec) {
-                    earlist = ptr;
-                }
+                if (ptr->valid == 0)
+                    break;
             }
-            ptr = earlist;
+
+            if ((char *) ptr - addr > cache_size) {
+                struct record  *earlist =
+                    (struct record *) (addr + sizeof(struct record *));
+
+                for (ptr =
+                     (struct record *) (addr +
+                                        sizeof(struct record *));
+                     (char *) ptr - (char *) addr < cache_size; ptr++) {
+                    if (ptr->tv.tv_sec < earlist->tv.tv_sec) {
+                        earlist = ptr;
+                    }
+                }
+                ptr = earlist;
+            }
+
+            if (ptr->valid == 1) {
+                memset(ptr, 0, sizeof(*ptr));
+            }
+
+            ptr->valid = 1;
+            strcpy(ptr->hostname, p->ai_canonname);
+            memcpy(&(ptr->sock), p->ai_addr, sizeof(*(p->ai_addr)));
+            memcpy(&(ptr->addr), p, sizeof(*p));
+            ptr->addr.ai_addr = (struct sockaddr *) &(ptr->sock);
+            ptr->addr.ai_canonname = ptr->hostname;
+
+            printf("hit\n");
+            ptr->next = *((struct record **) addr);
+            *((struct record **) addr) = ptr;
+
+            printf("hit\n");
+
+            ptr->prev = NULL;
+
+            printf("hit\n");
+
+            if (ptr->next != NULL)
+                ptr->next->prev = ptr;
+
+            printf("hit\n");
+
+            gettimeofday(&(ptr->tv), NULL);
+
+            freeaddrinfo(ai);
+            sem_post(sem);
+            printf("finish the linked list\n");
+            _exit(EXIT_SUCCESS);
+        default:
+            return sfd;
         }
-
-        if (ptr->valid == 1) {
-            memset(ptr, 0, sizeof(*ptr));
-        }
-
-
-        ptr->valid = 1;
-        strcpy(ptr->hostname, p->ai_canonname);
-        memcpy(&(ptr->sock), p->ai_addr, sizeof(*(p->ai_addr)));
-        memcpy(&(ptr->addr), p, sizeof(*p));
-        ptr->addr.ai_addr = (struct sockaddr *) &(ptr->sock);
-        ptr->addr.ai_canonname = ptr->hostname;
-
-        printf("hit\n");
-        ptr->next = *((struct record **) addr);
-        *((struct record **) addr) = ptr;
-
-        printf("hit\n");
-
-        ptr->prev = NULL;
-
-        printf("hit\n");
-
-        if (ptr->next != NULL)
-            ptr->next->prev = ptr;
-
-        printf("hit\n");
-
-        gettimeofday(&(ptr->tv), NULL);
-
-        freeaddrinfo(ai);
-        sem_post(sem);
-        printf("finish the linked list\n");
-        return sfd;
     }
 
   error:
@@ -424,7 +439,6 @@ proxy(int sfd)
     int             rate;
     int             factor;
 
-
     struct timeval  current_time;
     struct timespec ts;
     time_t          prev_second;
@@ -493,14 +507,14 @@ proxy(int sfd)
         }
 
         byte_count =
-            readLine(client->socketfd, client->buffer + client->bytes_read,
+            readLine(client->socketfd,
+                     client->buffer + client->bytes_read,
                      KBYTES_TO_BYTES(2));
 
         check(byte_count != -1, "Cannot read.");
 
         if (byte_count == 0)
             goto cleanup;
-
 
         if (line_count == 0) {
             char           *p = client->buffer + client->bytes_read;
@@ -511,8 +525,8 @@ proxy(int sfd)
             }
             byte_count =
                 process_request_line(request_hostname, request_port,
-                                     client->buffer + client->bytes_read,
-                                     byte_count);
+                                     client->buffer +
+                                     client->bytes_read, byte_count);
 
             while (p - (client->buffer + client->bytes_read) < byte_count) {
                 putchar(*p);;;
@@ -552,9 +566,10 @@ proxy(int sfd)
             printf("host: %s port: %s\n", hostname, port);
             printf("host %s %s\n", serveri->hostname, hostname);
             check(strcasecmp(request_hostname, hostname) == 0,
-                  "The URL specified");
+                  "The URL specified %s != %s", request_hostname,
+                  hostname);
             check(strcasecmp(request_port, port) == 0,
-                  "The URL specified");
+                  "The URL specified %s != %s", request_port, port);
             if (serveri->socketfd == -1
                 || strcasecmp(serveri->hostname, hostname) != 0) {
                 /*
@@ -570,8 +585,8 @@ proxy(int sfd)
                 serveri->hostname = strdup(hostname);
             } else {
                 if (serveri->hostname != NULL)
-                    printf("%ld is reusing: %s %s", (long) getpid(),
-                           serveri->hostname, hostname);
+                    printf("%ld is reusing: %s %s",
+                           (long) getpid(), serveri->hostname, hostname);
             }
         }
 
@@ -594,8 +609,8 @@ proxy(int sfd)
         if (strcasecmp(p->name, "rates") == 0) {
             struct config_token *token = p->tokens;
             while (token != NULL) {
-                if (endswith(serveri->hostname, token->token, 1) == 0
-                    && strlen(token->token) > largest) {
+                if (endswith(serveri->hostname, token->token, 1)
+                    == 0 && strlen(token->token) > largest) {
                     largest = strlen(token->token);
                     rate = atoi(token->value);
 
@@ -671,10 +686,12 @@ proxy(int sfd)
 
             if (rate != -1) {
                 sleep_time =
-                    (useconds_t) (factor * BYTES_TO_KBYTES(byte_count)) -
-                    ((useconds_t) (current_time.tv_sec - prev_second)) *
-                    USECOND_PER_SECOND - (current_time.tv_usec -
-                                          prev_usecond);
+                    (useconds_t) (factor *
+                                  BYTES_TO_KBYTES(byte_count)) -
+                    ((useconds_t)
+                     (current_time.tv_sec -
+                      prev_second)) * USECOND_PER_SECOND -
+                    (current_time.tv_usec - prev_usecond);
                 if (sleep_time >= 0) {
                     ts.tv_nsec = sleep_time * 1000;
                     nanosleep(&ts, NULL);
@@ -699,8 +716,8 @@ proxy(int sfd)
                 goto start;
 
             byte_count =
-                recv(client->socketfd, client->buffer, KBYTES_TO_BYTES(2),
-                     0);
+                recv(client->socketfd, client->buffer,
+                     KBYTES_TO_BYTES(2), 0);
             check(byte_count != -1,
                   "Error when receiving data from the client.");
             if (byte_count == 0)
@@ -718,7 +735,6 @@ proxy(int sfd)
             break;
         }
     }
-
 
   cleanup:
     printf("%ld finish\n", (long) getpid());

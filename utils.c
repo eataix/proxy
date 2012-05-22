@@ -119,23 +119,21 @@ process_request_line(char *hostname, char *port, char *buffer,
         *b = *p;
         b++;
         p++;
-    } while (*b != '\n' && *(b - 1) != '\r');
+    } while (*(b - 1) != '\n' && *(b - 2) != '\r');
 
     if (hn - hostname == 0) {
         return -1;
     }
 
-    hn++;
     *hn = '\0';
 
     if (pp - port == 0) {
         strcpy(pp, "80");
     } else {
-        pp++;
         *pp = '\0';
     }
 
-    return b - buffer + 1;
+    return b - buffer;
 }
 
 int
@@ -158,7 +156,6 @@ lastIndexOf(const char *s1, const char ch)
     }
     return -1;
 }
-
 
 BOOLEAN
 contains(const char *s1, const char *s2, int caseinsensitive)
