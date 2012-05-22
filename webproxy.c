@@ -43,6 +43,9 @@
 #include <sys/stat.h>           /* Defines mode constants */
 #include <sys/mman.h>
 
+
+#include <semaphore.h>
+
 #include "dbg.h"
 #include "readline.h"
 #include "config.h"
@@ -99,6 +102,7 @@ struct config_sect *conf = NULL;
 
 char           *addr = NULL;
 int             cache_size;
+sem_t          *sem;
 
 /*
  * Signal handler of the parent process.
@@ -116,6 +120,7 @@ sigHandler(int sig)
         printf("Catch termination.\n");
         sleep(2);
         shm_unlink("dnscache");
+        sem_unlink("dnscachesem");
         config_destroy(conf);
         exit(EXIT_SUCCESS);
     }
@@ -157,17 +162,10 @@ make_socket(const char *name, const char *port)
 
     printf("%ld Prepare to connect to host: %s port:%s\n", (long) getpid(),
            name, port);
+    sem_wait(sem);
+    printf("%ld is unblocked\n", getpid());
 
-    {
-        int            *i;
-        i = (int *) addr;
-
-        while (*i == 1) {
-            usleep(USECOND_PER_SECOND / 2);
-        }
-    }
-
-    for (ptr = (struct record *) (addr + sizeof(int));
+    for (ptr = (struct record *) addr;
          (char *) ptr - (char *) addr < cache_size; ptr++) {
 
         if (ptr->valid == 0)    // End of record.
@@ -187,6 +185,7 @@ make_socket(const char *name, const char *port)
             }
             printf("Reusing dns cache%s\n", name);
             gettimeofday(&(ptr->tv), NULL);
+            sem_post(sem);
             return sfd;
         } else {
             printf("cache has: %s\n", ptr->hostname);
@@ -214,15 +213,9 @@ make_socket(const char *name, const char *port)
         printf("Connected to %s\n", p->ai_canonname);
 
         {
-            int            *i;
-            i = (int *) addr;
-            *i = 1;
-        }
-
-        {
             int             hit;
             hit = 0;
-            for (ptr = (struct record *) (addr + sizeof(int));
+            for (ptr = (struct record *) addr;
                  (char *) ptr - (char *) addr < cache_size; ptr++) {
                 if (ptr->valid == 1) {
                     continue;
@@ -239,10 +232,9 @@ make_socket(const char *name, const char *port)
             }
 
             if (hit == 0) {
-                struct record  *earlist =
-                    (struct record *) (addr + sizeof(int));
+                struct record  *earlist = (struct record *) addr;
 
-                for (ptr = (struct record *) (addr + sizeof(int));
+                for (ptr = (struct record *) addr;
                      (char *) ptr - (char *) addr < cache_size; ptr++) {
                     if (ptr->tv.tv_sec < earlist->tv.tv_sec) {
                         earlist = ptr;
@@ -261,17 +253,13 @@ make_socket(const char *name, const char *port)
             }
         }
 
-        {
-            int            *i;
-            i = (int *) addr;
-            *i = 0;
-        }
-
         freeaddrinfo(ai);
+        sem_post(sem);
         return sfd;
     }
 
   error:
+    sem_post(sem);
     return -1;
 }
 
@@ -688,7 +676,7 @@ main(int argc, char *argv[])
     check(conf != NULL, "Cannot find configuration file.");
     config_dump(conf);
 
-    cache_size = NUM_RECORD * sizeof(struct record) + sizeof(int);
+    cache_size = NUM_RECORD * sizeof(struct record);
 
     fd = shm_open("dnscache", O_CREAT | O_EXCL | O_RDWR,
                   S_IRUSR | S_IWUSR);
@@ -701,12 +689,12 @@ main(int argc, char *argv[])
 
     addr =
         mmap(NULL, cache_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-
     check(addr != MAP_FAILED, "Cannot map?!");
 
-    memset(addr, 0, cache_size);
+    sem = sem_open("dnscachesem", O_CREAT | O_EXCL, S_IRUSR | S_IWUSR, 1);
+    check(sem != SEM_FAILED, "Cannot create semaphores.");
 
-    // memcpy(addr, str, strlen(str));
+    memset(addr, 0, cache_size);
 
     setbuf(stdout, NULL);
 
