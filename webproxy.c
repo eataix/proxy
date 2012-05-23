@@ -420,6 +420,9 @@ proxy(int sfd)
     check_mem(server->buffer);
     server->bytes_read = 0;
 
+    server->hostname = malloc(HOSTNAME_LENGTH);
+    check_mem(server->hostname);
+
     hostname = malloc(HOSTNAME_LENGTH);
     check_mem(hostname);
 
@@ -465,7 +468,7 @@ proxy(int sfd)
         byte_count =
             readLine(client->socketfd,
                      client->buffer + client->bytes_read,
-                     KBYTES_TO_BYTES(2));
+                     KBYTES_TO_BYTES(5));
 
         check(byte_count != -1, "Cannot read.");
 
@@ -543,7 +546,7 @@ proxy(int sfd)
                     send_error(client->socketfd, 503);
                     goto error;
                 }
-                FREEMEM(server->hostname);
+                memset(server->hostname, 0, sizeof(*(server->hostname)));
                 strcpy(server->hostname, hostname);
             }
         }
@@ -575,6 +578,7 @@ proxy(int sfd)
     client->bytes_read = 0;
 
 
+    log_info("Get the rate");
     /*
      * Get the rate.
      */
@@ -702,7 +706,7 @@ proxy(int sfd)
 
             byte_count =
                 recv(client->socketfd, client->buffer,
-                     KBYTES_TO_BYTES(2), 0);
+                     KBYTES_TO_BYTES(10), 0);
             check(byte_count != -1,
                   "Error when receiving data from the client.");
             if (byte_count == 0)
