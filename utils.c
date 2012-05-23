@@ -98,7 +98,6 @@ process_request_line(char *hostname, char *port, char *buffer,
             }
             break;
         }
-        printf("*hn = %c\n", *p);
         *hn++ = *p++;
     }
 

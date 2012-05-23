@@ -12,7 +12,7 @@
  * this list of conditions and the following disclaimer in the documentation
  * and/or other materials provided with the distribution
  *
- * THIS SOFTWARE IS PROVIDED BY Meitian Huang AND CONTRIBUTORS "AS IS"
+ * THIS SOFTWARE IS PROVIDED BY COPYRIGHT OWNER AND CONTRIBUTORS "AS IS"
  * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
  * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
  * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
@@ -24,26 +24,24 @@
  * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
  * POSSIBILITY OF SUCH DAMAGE.
  */
+
+#include <sys/mman.h>
+#include <sys/time.h>
 #include <sys/types.h>
 #include <sys/socket.h>
+#include <sys/stat.h>           /* Defines mode constants */
 #include <arpa/inet.h>
+
+#include <assert.h>
+#include <ctype.h>
+#include <fcntl.h>              /* Defines O_* constants */
 #include <netdb.h>
+#include <semaphore.h>
+#include <signal.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/time.h>
-#include <unistd.h>
-#include <signal.h>
-#include <fcntl.h>
-#include <ctype.h>
 #include <time.h>
-#include <assert.h>
-
-#include <sys/stat.h>
-#include <fcntl.h>              /* Defines O_* constants */
-#include <sys/stat.h>           /* Defines mode constants */
-#include <sys/mman.h>
-
-#include <semaphore.h>
+#include <unistd.h>
 
 #include "dbg.h"
 #include "readline.h"
@@ -209,7 +207,7 @@ hash(const unsigned char *str)
 }
 
 /*
- * Establishes a connection with the really server.
+ * Establishes a connection with the real server.
  * Returns the socket file descriptor with the server.
  * Returns -1 on failure.
  */
@@ -223,11 +221,11 @@ make_socket(const char *name, const char *port)
     struct record  *ptr;
     pid_t           pid;
 
-
     log_info("Child process %ld is attempting to connect to "
              "host:%s, port: %s", (long) getpid(), name, port);
 
     ptr = (struct record *) addr + hash((unsigned char *) name);
+
     sem_wait(sem);
     if (ptr->valid != 0 && strcasecmp(ptr->hostname, name) == 0) {
         sfd =
@@ -272,7 +270,13 @@ make_socket(const char *name, const char *port)
         pid = fork();
         check(pid != -1, "Cannot fork");
 
+        /*
+         * Use fork(2) to speed up. The parent will return the socket file
+         * descriptor to the caller. The child will add the record in the
+         * shared memory and exit.
+         */
         switch (pid) {
+
         case 0:
             sem_wait(sem);
 
@@ -290,6 +294,7 @@ make_socket(const char *name, const char *port)
 
             sem_post(sem);
             _exit(EXIT_SUCCESS);
+
         default:
             freeaddrinfo(ai);
             return sfd;
@@ -304,16 +309,19 @@ make_socket(const char *name, const char *port)
 
 /*
  * Extracts the value of HTTP header.
- * e.g., from "Host: example.com\r\n" to "example.com"
  */
 int
 extract(char *hostname, char *port, const char *line)
 {
 
-    char           *h = hostname,
-        *p = port;
+    char           *h,
+                   *p;
 
-    const char     *ch = line;
+    const char     *ch;
+
+    h = hostname;
+    p = port;
+    ch = line;
 
     /*
      * RFC 2616 Section 4.2
@@ -343,6 +351,35 @@ extract(char *hostname, char *port, const char *line)
     }
 
     return 0;
+}
+
+int
+get_rate(const char *hostname)
+{
+    struct config_sect *p;
+    size_t          best_match;
+    struct config_token *token;
+    int             rate;
+
+    p = conf;
+    best_match = 0;
+    rate = -1;
+    while (p != NULL) {
+        if (strcasecmp(p->name, "rates") == 0) {
+            token = p->tokens;
+            while (token != NULL) {
+                if (endswith(hostname, token->token, 1) == TRUE
+                    && strlen(token->token) > best_match) {
+                    best_match = strlen(token->token);
+                    rate = atoi(token->value);
+                }
+                token = token->next;
+            }
+        }
+        p = p->next;
+    }
+
+    return rate;
 }
 
 void
@@ -394,7 +431,6 @@ proxy(int sfd)
      */
     int             content_flag;
 
-    struct config_sect *p;
 
     signal(SIGTERM, childSigHandler);
 
@@ -443,7 +479,6 @@ proxy(int sfd)
 
     byte_count = 0;
     line_count = 0;
-    rate = -1;
     content_flag = 0;
 
     FD_ZERO(&master);
@@ -455,8 +490,12 @@ proxy(int sfd)
 
     for (;;) {
         read_fds = master;
-        check(select(fdmax + 1, &read_fds, NULL, NULL, &tv) != -1,
-              "select() fails");
+
+        if (select(fdmax + 1, &read_fds, NULL, NULL, &tv) == -1) {
+            log_err("select() fails");
+            send_error(client->socketfd, 503);
+            goto error;
+        }
 
         /*
          * Timeout
@@ -470,7 +509,11 @@ proxy(int sfd)
                      client->buffer + client->bytes_read,
                      KBYTES_TO_BYTES(5));
 
-        check(byte_count != -1, "Cannot read.");
+        if (byte_count == -1) {
+            log_warn("Failed to read from the client.");
+            send_error(client->socketfd, 400);
+            goto error;
+        }
 
         /*
          * Client closes the connection.
@@ -521,11 +564,17 @@ proxy(int sfd)
             /*
              * Consistence check
              */
-            check(strcasecmp(request_hostname, hostname) == 0,
-                  "Hostname is consistent");
+            if (strcasecmp(request_hostname, hostname) != 0) {
+                log_warn("Hostname is consistent");
+                send_error(client->socketfd, 400);
+                goto error;
+            }
 
-            check(strcasecmp(request_port, port) == 0,
-                  "Port is inconsistent");
+            if (strcasecmp(request_port, port) != 0) {
+                log_warn("Port is inconsistent");
+                send_error(client->socketfd, 400);
+                goto error;
+            }
 
             /*
              * Do we need a new socket?
@@ -546,6 +595,7 @@ proxy(int sfd)
                     send_error(client->socketfd, 503);
                     goto error;
                 }
+                rate = get_rate(hostname);
                 memset(server->hostname, 0, sizeof(*(server->hostname)));
                 strcpy(server->hostname, hostname);
             }
@@ -564,41 +614,26 @@ proxy(int sfd)
     /*
      * Check for error.
      */
-    check((server->socketfd != -1), "Cannot connect to the real server.");
+    if (server->socketfd == -1) {
+        log_err("Cannot connect to the real server.");
+        send_error(client->socketfd, 503);
+        goto error;
+    }
 
     /*
      * Send the content in the buffer to the server.
      */
-    check(send(server->socketfd, client->buffer, client->bytes_read, 0) ==
-          client->bytes_read, "Failed to send.");
+    if (send(server->socketfd, client->buffer, client->bytes_read, 0) !=
+        client->bytes_read) {
+        log_err("Failed to send.");
+        send_error(client->socketfd, 503);
+        goto error;
+    }
 
     /*
      * Reset the count.
      */
     client->bytes_read = 0;
-
-
-    log_info("Get the rate");
-    /*
-     * Get the rate.
-     */
-    p = conf;
-    size_t          largest = 0;
-    while (p != NULL) {
-        if (strcasecmp(p->name, "rates") == 0) {
-            struct config_token *token = p->tokens;
-            while (token != NULL) {
-                if (endswith(server->hostname, token->token, 1)
-                    == 0 && strlen(token->token) > largest) {
-                    largest = strlen(token->token);
-                    rate = atoi(token->value);
-
-                }
-                token = token->next;
-            }
-        }
-        p = p->next;
-    }
 
     FD_ZERO(&master);
     FD_SET(server->socketfd, &master);
@@ -623,8 +658,10 @@ proxy(int sfd)
 
         read_fds = master;
 
-        check(select(fdmax + 1, &read_fds, NULL, NULL, &tv) != -1,
-              "Cannot select.");
+        if (select(fdmax + 1, &read_fds, NULL, NULL, &tv) == -1) {
+            log_warn("Cannot select.");
+            send_error(client->socketfd, 503);
+        }
 
         if (FD_ISSET(server->socketfd, &read_fds)) {
 
@@ -638,8 +675,11 @@ proxy(int sfd)
                                   server->buffer,
                                   KBYTES_TO_BYTES(rate), 0);
 
-            check(byte_count != -1,
-                  "Error when receiving data from the real server.");
+            if (byte_count == -1) {
+                log_err("Error when receiving data from the real server.");
+                send_error(client->socketfd, 503);
+                goto error;
+            }
 
             if (byte_count == 0)
                 goto cleanup;
@@ -657,8 +697,10 @@ proxy(int sfd)
 
             byte_count =
                 send(client->socketfd, server->buffer, byte_count, 0);
-            check(byte_count != -1,
-                  "Error when sending data to the client.");
+            if (byte_count == -1) {
+                log_err("Error when sending data to the client.");
+                send_error(client->socketfd, 503);
+            }
             if (byte_count == 0)
                 goto cleanup;
 
@@ -707,18 +749,22 @@ proxy(int sfd)
             byte_count =
                 recv(client->socketfd, client->buffer,
                      KBYTES_TO_BYTES(10), 0);
-            check(byte_count != -1,
-                  "Error when receiving data from the client.");
+            if (byte_count == -1) {
+                log_err("Error when receiving data from the client.");
+                send_error(client->socketfd, 503);
+                goto error;
+            }
             if (byte_count == 0)
                 goto cleanup;
 
             byte_count =
                 send(server->socketfd, client->buffer, byte_count, 0);
-            check(byte_count != -1,
-                  "Error when sending data to the server.");
 
-            if (byte_count == -1)
-                goto cleanup;
+            if (byte_count == -1) {
+                log_err("Error when sending data to the server.");
+                send_error(client->socketfd, 503);
+                goto error;
+            }
 
             continue;
         } else {                /* Timeout */
@@ -774,9 +820,12 @@ main(int argc, char *argv[])
         if (strcmp(argv[1], "-f") == 0) {
 
             conf = config_load(argv[2]);
-            check(conf != NULL, "Cannot find configuration file.");
-            config_dump(conf);
-
+            if (conf == NULL) {
+                log_warn("Cannot find configuration file.");
+            }
+            /*
+             * config_dump(conf);
+             */
             break;
         }
     default:
