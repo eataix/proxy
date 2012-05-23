@@ -134,7 +134,7 @@ hash(const unsigned char *str)
     while ((c = *str++))
         hash = ((hash << 5) + hash) + c;
 
-    return hash;
+    return hash % NUM_RECORD;
 }
 
 /*
@@ -211,7 +211,7 @@ make_socket(const char *name, const char *port)
     ptr += start;
 
     sem_wait(sem);
-    if (strcasecmp(ptr->hostname, name) == 0) {
+    if (ptr->valid != 0 && strcasecmp(ptr->hostname, name) == 0) {
         sfd =
             socket(ptr->addr.ai_family, ptr->addr.ai_socktype,
                    ptr->addr.ai_protocol);
@@ -280,20 +280,19 @@ make_socket(const char *name, const char *port)
             ptr->addr.ai_addr = (struct sockaddr *) &(ptr->sock);
             ptr->addr.ai_canonname = ptr->hostname;
 
-
             gettimeofday(&(ptr->tv), NULL);
-
-            freeaddrinfo(ai);
 
             sem_post(sem);
             printf("finish the linked list\n");
             _exit(EXIT_SUCCESS);
         default:
+            freeaddrinfo(ai);
             return sfd;
         }
     }
 
   error:
+    freeaddrinfo(ai);
     sem_post(sem);
     return -1;
 }
@@ -752,8 +751,7 @@ main(int argc, char *argv[])
     check(conf != NULL, "Cannot find configuration file.");
     config_dump(conf);
 
-    cache_size =
-        NUM_RECORD * sizeof(struct record) + sizeof(struct record *);
+    cache_size = NUM_RECORD * sizeof(struct record);
 
     fd = shm_open("dnscache", O_CREAT | O_EXCL | O_RDWR,
                   S_IRUSR | S_IWUSR);
@@ -829,7 +827,6 @@ main(int argc, char *argv[])
             break;
         default:
             close(newfd);
-            continue;
         }
     }
 
