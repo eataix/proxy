@@ -79,8 +79,18 @@ config_load(char *filename)
          */
         char           *p;
         for (p = line; *p == ' ' || *p == '\t'; p++);
+
+
         if (p != line)
-            strcpy(line, p);
+            /**
+             * The original implementation uses strcpy(3), which is acceptable
+             * in most cases. However, in this case, `s1` and `s2` overlap.
+             * According to POSIX.1-2008, "If copying takes place between
+             * objects that overlap, the behavior is undefined." Hence, I
+             * replace it with memmove(3), which "copy bytes in memory with
+             * overlapping areas".
+             */
+            memmove(line, p, strlen(p) + 1);
 
         if (line[0] == '#')
             continue;           /* skip lines with comment */
