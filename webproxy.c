@@ -104,11 +104,17 @@ struct record {
 
 struct config_sect *conf = NULL;
 
-/* Posix Shared Memory */
+/*
+ * Posix Shared Memory
+ */
 char           *addr = NULL;
-/* Size of shared memory  */
+/*
+ * Size of shared memory
+ */
 int             cache_size;
-/* POSIX Semaphores */
+/*
+ * POSIX Semaphores
+ */
 sem_t          *sem;
 
 /*
@@ -183,7 +189,7 @@ send_error(int sfd, const int code)
     }
 }
 
-inline unsigned long
+unsigned long
 hash(const unsigned char *str)
 {
     const unsigned char *p;
@@ -295,14 +301,14 @@ make_socket(const char *name, const char *port)
  * Extracts the value of HTTP header.
  * e.g., from "Host: example.com\r\n" to "example.com"
  */
-char           *
-extract_header(const char *line, const char *key, const int prefix_length)
+int
+extract(char *hostname, char *port, const char *line)
 {
-    int             length;
-    char           *header = NULL;
-    const char     *ptr;
 
-    assert(strncasecmp(line, key, prefix_length) == 0);
+    char           *h = hostname,
+        *p = port;
+
+    const char     *ch = line;
 
     /*
      * RFC 2616 Section 4.2
@@ -312,50 +318,26 @@ extract_header(const char *line, const char *key, const int prefix_length)
      * preceded by any amount of LWS, though a single SP is preferred.
      */
 
-    /*
-     * Skips LWS.
-     */
-    for (ptr = line + prefix_length; *ptr == ' ' || *ptr == '\t'; ptr++);
+    while (*ch != ' ' && *ch != '\t')
+        ch++;
 
-    length = strcspn(ptr, "\r\n");
+    while (*ch == ' ' || *ch == '\t')
+        ch++;
 
-    header = malloc(length + 1);
-    check_mem(header);
+    while (*ch != ':' && *ch != '\r')
+        *h++ = *ch++;
+    *h = '\0';
 
-    *header = '\0';
-    strncat(header, ptr, length);
-
-    return header;
-
-  error:
-    return NULL;
-}
-
-/*
- * Splits the hostname and the port.
- * e.g., "Host: example.com:8080" to hostname = example.com & port = 8080.
- *
- * If cannot find port, use "80".
- */
-void
-parsehostname(const char *raw_hostname, char *hostname, char *port)
-{
-    char           *newstr;
-    char           *p;
-    newstr = strdup(raw_hostname);
-
-    if ((p = strtok(newstr, ":")) == NULL) {
-        strcpy(hostname, newstr);
-        strcpy(port, DEFAULT_PORT);
+    if (*ch == ':') {
+        ch++;
+        while (isdigit(*ch))
+            *p++ = *ch++;
+        *p = '\0';
     } else {
-        strcpy(hostname, p);
-        if ((p = strtok(NULL, ":")) == NULL) {
-            strcpy(port, DEFAULT_PORT);
-        } else {
-            strcpy(port, p);
-        }
+        strcpy(p, DEFAULT_PORT);
     }
-    free(newstr);
+
+    return 0;
 }
 
 void
@@ -430,7 +412,7 @@ proxy(int sfd)
     memset(request_port, 0, sizeof(*request_port));
 
     byte_count = 0;
-    line_count = 1;
+    line_count = 0;
     rate = -1;
     content_flag = 0;
 
@@ -464,7 +446,7 @@ proxy(int sfd)
                 process_request_line(request_hostname, request_port,
                                      client->buffer +
                                      client->bytes_read, byte_count);
-
+            log_info("host: %s, port: %s", request_hostname, request_port);
             if (byte_count == -1) {
                 send_error(client->socketfd, 400);
                 goto error;
@@ -487,13 +469,10 @@ proxy(int sfd)
         if (strncasecmp
             (client->buffer + client->bytes_read, HOST_PREFIX,
              HOST_PREFIX_LENGTH) == 0) {
-            FREEMEM(raw_hostname);
-            raw_hostname =
-                extract_header(client->buffer + client->bytes_read,
-                               HOST_PREFIX, HOST_PREFIX_LENGTH);
-            check(raw_hostname != NULL, "The header is malformed");
-            parsehostname(raw_hostname, hostname, port);
-            if (line_count == 0) {
+            memset(hostname, 0, sizeof(*hostname));
+            memset(port, 0, sizeof(*port));
+            extract(hostname, port, client->buffer + client->bytes_read);
+            if (line_count == 1) {
                 check(strcasecmp(request_hostname, hostname) == 0,
                       "The URL specified %s != %s", request_hostname,
                       hostname);
@@ -724,8 +703,7 @@ main(int argc, char *argv[])
 
     cache_size = NUM_RECORD * sizeof(struct record);
 
-    fd = shm_open(SHM_NAME, O_CREAT | O_EXCL | O_RDWR,
-                  S_IRUSR | S_IWUSR);
+    fd = shm_open(SHM_NAME, O_CREAT | O_EXCL | O_RDWR, S_IRUSR | S_IWUSR);
     check(fd != -1, "Cannot create shared memory.");
 
     check(ftruncate(fd, cache_size) != -1, "Cannot resize the object");
@@ -736,7 +714,9 @@ main(int argc, char *argv[])
 
     *((struct record **) addr) = NULL;
 
-    sem = sem_open(SEM_NAME, O_CREAT | O_EXCL | O_RDWR, S_IRUSR | S_IWUSR, 1);
+    sem =
+        sem_open(SEM_NAME, O_CREAT | O_EXCL | O_RDWR, S_IRUSR | S_IWUSR,
+                 1);
     check(sem != SEM_FAILED, "Cannot create semaphores.");
     memset(addr, 0, cache_size);
 

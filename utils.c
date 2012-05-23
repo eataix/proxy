@@ -27,8 +27,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
-#include "utils.h"
 #include <stdio.h>
+
+#include "utils.h"
+#include "dbg.h"
 
 #define HTTP_SCHEME_PREFIX "http://"
 
@@ -66,48 +68,50 @@ process_request_line(char *hostname, char *port, char *buffer,
                    *b,
                    *hn,
                    *pp;
+    p = buffer;
+    hn = hostname;
+    pp = port;
 
-    for (p = buffer, b = buffer; *p != ' ' && b - buffer < count;
-         p++, b++);
+    while (*p++ != ' ');
 
-    if (b - buffer >= count)
-        return -1;
+    check(isalnum(*p) || *p == '*', "Invalid format");
 
-    *b = *p;
-    p++;
-    b++;
-
-    if (!isalnum(*p) && *p != '*') {
-        printf("not *");
-        return -1;
-    }
+    b = p;
 
     /*
      * RFC 2616 Section 3.2.2
      * Comparisons of scheme names MUST be case-insensitive;
      */
-    if (strncasecmp(b, HTTP_SCHEME_PREFIX, strlen(HTTP_SCHEME_PREFIX)) !=
-        0) {
-        return -1;
+    if (strncasecmp(p, HTTP_SCHEME_PREFIX, strlen(HTTP_SCHEME_PREFIX))
+        != 0) {
+        log_info("Not absolute url. %c", *p);
+        return count;
     }
 
     p += strlen(HTTP_SCHEME_PREFIX);
 
-    hn = hostname;
-    pp = port;
-
     while (*p != '/' && *p != ' ') {
         if (*p == ':') {
+            p++;
             while (*p != '/' && *p != ' ') {
-                *pp = *p;
-                pp++;
-                p++;
+                *pp++ = *p++;
             }
             break;
         }
-        *hn = *p;
-        hn++;
-        p++;
+        printf("*hn = %c\n", *p);
+        *hn++ = *p++;
+    }
+
+    if (hn == hostname) {
+        return -1;
+    } else {
+        *hn = '\0';
+    }
+
+    if (pp == port) {
+        strcpy(pp, "80");
+    } else {
+        *pp = '\0';
     }
 
     if (*p == ' ') {
@@ -116,24 +120,12 @@ process_request_line(char *hostname, char *port, char *buffer,
     }
 
     do {
-        *b = *p;
-        b++;
-        p++;
+        *b++ = *p++;
     } while (*(b - 1) != '\n' && *(b - 2) != '\r');
 
-    if (hn - hostname == 0) {
-        return -1;
-    }
-
-    *hn = '\0';
-
-    if (pp - port == 0) {
-        strcpy(pp, "80");
-    } else {
-        *pp = '\0';
-    }
-
     return b - buffer;
+  error:
+    return -1;
 }
 
 int
