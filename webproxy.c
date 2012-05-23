@@ -54,14 +54,14 @@
  * RFC 2616 3.2.2
  * "If the port is empty or not given, port 80 is assumed."
  */
-#define DEFAULT_PORT ("80")
+#define DEFAULT_PORT "80"
 
 #define NUM_RECORD              100
 
 #define RECORD_HOSTNAME_LENGTH  30
 
-#define BUFFER_SIZE (INT16_MAX)
-#define USECOND_PER_SECOND (1000000)
+#define BUFFER_SIZE INT16_MAX
+#define USECOND_PER_SECOND 1000000
 #define BYTES_TO_KBYTES(A) (A / 1024)
 #define KBYTES_TO_BYTES(A) (A * 1024)
 
@@ -69,9 +69,16 @@
 #define _POSIX_C_SOURCE
 #endif
 
-#define HOST_PREFIX        ("Host:")
-#define HOST_PREFIX_LENGTH (strlen(HOST_PREFIX))
+#define HOST_PREFIX        "Host:"
+#define HOST_PREFIX_LENGTH strlen(HOST_PREFIX)
 
+#define SHM_NAME "dnscache_shm"
+#define SEM_NAME "dnscache_sem"
+
+/*
+ * HTTP/1.1 100 Continue is the ONLY response from the server that allows the
+ * client to send the rest of the request.
+ */
 #define HTTP_CONTINUE_MESSAGE        "HTTP/1.1 100 Continue\r\n\r\n"
 #define HTTP_CONTINUE_MESSAGE_LENGTH strlen(HTTP_CONTINUE_MESSAGE)
 
@@ -91,14 +98,17 @@ struct record {
                                  * fields are invalid. Don't rely on this
                                  * too much. */
     struct sockaddr_storage sock;       /* Use sockaddr_storage to support
-                                         * IPv6 */
+                                         * both IPv4 and IPv6 */
     struct timeval  tv;         /* When this record was used last time */
 };
 
 struct config_sect *conf = NULL;
 
+/* Posix Shared Memory */
 char           *addr = NULL;
+/* Size of shared memory  */
 int             cache_size;
+/* POSIX Semaphores */
 sem_t          *sem;
 
 /*
@@ -111,30 +121,18 @@ sigHandler(int sig)
         /*
          * If the user press "Ctrl-C", terminate all the child processes.
          */
-        printf("Catch interrupt.\n");
+        log_info("Catch SIGINT");
         kill(0, SIGTERM);
-    } else if (sig == SIGTERM) {
-        printf("Catch termination.\n");
+    }
+
+    if (sig == SIGTERM) {
+        log_info("Catch SIGTERM");
         sleep(2);
-        shm_unlink("dnscache");
-        sem_unlink("dnscachesem");
+        shm_unlink(SHM_NAME);
+        sem_unlink(SEM_NAME);
         config_destroy(conf);
         exit(EXIT_SUCCESS);
     }
-}
-
-unsigned long
-hash(const unsigned char *str)
-{
-    const unsigned char *p;
-    unsigned long   hash = 5381;
-    int             c;
-    p = str;
-
-    while ((c = *str++))
-        hash = ((hash << 5) + hash) + c;
-
-    return hash % NUM_RECORD;
 }
 
 /*
@@ -147,12 +145,12 @@ childSigHandler(int sig)
         /*
          * Clean up.
          */
-        printf("%d is going to terminate\n", getpid());
-                /****************************** WARNING ****************************
-                 * The child process uses _exit(2) to terminate. The resources
-                 * may not be fully released. Its parent should use exit(2) to
-                 * terminate and releases the resources (e.g., file descriptors).
-                 ******************************************************************/
+        log_warn("Child process %ld is existing.", (long) getpid);
+        /****************************** WARNING ****************************
+         * The child process uses _exit(2) to terminate. The resources
+         * may not be fully released. Its parent should use exit(2) to
+         * terminate and releases the resources (e.g., file descriptors).
+         ******************************************************************/
         _exit(0);
     }
 }
@@ -179,10 +177,24 @@ send_error(int sfd, const int code)
     if (sfd != -1) {
         send(sfd, head, strlen(head), 0);
         send(sfd, tail, strlen(tail), 0);
-        return 1;
+        return 0;
     } else {
         return -1;
     }
+}
+
+inline unsigned long
+hash(const unsigned char *str)
+{
+    const unsigned char *p;
+    unsigned long   hash = 5381;
+    int             c;
+    p = str;
+
+    while ((c = *str++))
+        hash = ((hash << 5) + hash) + c;
+
+    return hash % NUM_RECORD;
 }
 
 /*
@@ -199,17 +211,12 @@ make_socket(const char *name, const char *port)
     int             sfd = -1;
     struct record  *ptr;
     pid_t           pid;
-    int             index,
-                    start;
 
-    printf("%ld Prepare to connect to host: %s port:%s\n", (long) getpid(),
-           name, port);
 
-    ptr = (struct record *) addr;
-    start = hash((unsigned char *) name);
-    index = start;
-    ptr += start;
+    log_info("Child process %ld is attempting to connect to "
+             "host:%s, port: %s", (long) getpid(), name, port);
 
+    ptr = (struct record *) addr + hash((unsigned char *) name);
     sem_wait(sem);
     if (ptr->valid != 0 && strcasecmp(ptr->hostname, name) == 0) {
         sfd =
@@ -226,24 +233,15 @@ make_socket(const char *name, const char *port)
             goto new_record;
         }
 
-        printf("Reusing dns cache%s\n", name);
-        gettimeofday(&(ptr->tv), NULL);
-
-        pid = fork();
-        check(pid != -1, "Cannot fork...");
-        switch (pid) {
-        case 0:
-            sem_post(sem);
-            _exit(EXIT_SUCCESS);
-        default:
-            return sfd;
-        }
+        log_info("Reusing DNS record of host:%s", name);
+        sem_post(sem);
+        return sfd;
     }
     sem_post(sem);
-
-    printf("Have not found matched\n");
+    log_info("Did not find the cached record for %s", name);
 
   new_record:
+
     memset(&hints, 0, sizeof(hints));
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
@@ -255,11 +253,10 @@ make_socket(const char *name, const char *port)
         sfd = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
         if (sfd == -1)
             continue;
-        printf("created a file discriptor\n");
         if (connect(sfd, p->ai_addr, p->ai_addrlen) != 0)
             continue;
 
-        printf("Connected to %s\n", p->ai_canonname);
+        log_info("Connected to %s", p->ai_canonname);
 
         pid = fork();
         check(pid != -1, "Cannot fork");
@@ -267,12 +264,10 @@ make_socket(const char *name, const char *port)
         switch (pid) {
         case 0:
             sem_wait(sem);
-            start = hash((unsigned char *) name);
-            ptr = (struct record *) addr;
-            ptr += start;
+
+            ptr = (struct record *) addr + hash((unsigned char *) name);
 
             memset(ptr, 0, sizeof(*ptr));
-
             ptr->valid = 1;
             strcpy(ptr->hostname, p->ai_canonname);
             memcpy(&(ptr->sock), p->ai_addr, sizeof(*(p->ai_addr)));
@@ -283,7 +278,6 @@ make_socket(const char *name, const char *port)
             gettimeofday(&(ptr->tv), NULL);
 
             sem_post(sem);
-            printf("finish the linked list\n");
             _exit(EXIT_SUCCESS);
         default:
             freeaddrinfo(ai);
@@ -326,11 +320,10 @@ extract_header(const char *line, const char *key, const int prefix_length)
     length = strcspn(ptr, "\r\n");
 
     header = malloc(length + 1);
-    check(header != NULL, "Cannot allocate memory to extra");
+    check_mem(header);
 
     *header = '\0';
     strncat(header, ptr, length);
-    printf("key: %s, value: %s\n", key, header);
 
     return header;
 
@@ -339,7 +332,7 @@ extract_header(const char *line, const char *key, const int prefix_length)
 }
 
 /*
- * Parses the Host field of HTTP request header.
+ * Splits the hostname and the port.
  * e.g., "Host: example.com:8080" to hostname = example.com & port = 8080.
  *
  * If cannot find port, use "80".
@@ -362,10 +355,7 @@ parsehostname(const char *raw_hostname, char *hostname, char *port)
             strcpy(port, p);
         }
     }
-
     free(newstr);
-
-    printf("host: %s port: %s\n", hostname, port);
 }
 
 void
@@ -404,34 +394,34 @@ proxy(int sfd)
     signal(SIGTERM, childSigHandler);
 
     client = malloc(sizeof(*client));
-    check(client != NULL, "Cannot allocate memory.");
+    check_mem(client);
     memset(client, 0, sizeof(*client));
 
     client->socketfd = sfd;
     client->buffer = malloc(BUFFER_SIZE);
-    check(client->buffer != NULL, "Cannot allocate memory for buffer");
+    check_mem(client->buffer);
     client->bytes_read = 0;
 
     serveri = malloc(sizeof(*serveri));
-    check(serveri != NULL, "Cannot allocate memory.");
+    check_mem(serveri);
     memset(serveri, 0, sizeof(*serveri));
 
     serveri->socketfd = -1;
     serveri->buffer = malloc(BUFFER_SIZE);
-    check(serveri->buffer != NULL, "Cannot allocate memory for buffer");
+    check_mem(serveri->buffer);
     serveri->bytes_read = 0;
 
     hostname = malloc(200);
-    check(hostname != NULL, "Cannot allocate memory.");
+    check_mem(hostname);
 
     port = malloc(20);
-    check(port != NULL, "Cannot allocate memory.");
+    check_mem(port);
 
     request_hostname = malloc(200);
-    check(request_hostname != NULL, "Cannot allocate memory");
+    check_mem(request_hostname);
 
     request_port = malloc(200);
-    check(request_port != NULL, "Cannot allocate memory");
+    check_mem(request_port);
 
   start:
     memset(hostname, 0, sizeof(*hostname));
@@ -470,23 +460,11 @@ proxy(int sfd)
             goto cleanup;
 
         if (line_count == 0) {
-            char           *p = client->buffer + client->bytes_read;
-
-            while (p - (client->buffer + client->bytes_read) < byte_count) {
-                putchar(*p);;;
-                p++;
-            }
             byte_count =
                 process_request_line(request_hostname, request_port,
                                      client->buffer +
                                      client->bytes_read, byte_count);
 
-            while (p - (client->buffer + client->bytes_read) < byte_count) {
-                putchar(*p);;;
-                p++;
-            }
-            printf("%d, hostname: %s, port: %s\n", byte_count,
-                   request_hostname, request_port);
             if (byte_count == -1) {
                 send_error(client->socketfd, 400);
                 goto error;
@@ -509,15 +487,12 @@ proxy(int sfd)
         if (strncasecmp
             (client->buffer + client->bytes_read, HOST_PREFIX,
              HOST_PREFIX_LENGTH) == 0) {
-            printf("host %s %s\n", serveri->hostname, hostname);
             FREEMEM(raw_hostname);
             raw_hostname =
                 extract_header(client->buffer + client->bytes_read,
                                HOST_PREFIX, HOST_PREFIX_LENGTH);
             check(raw_hostname != NULL, "The header is malformed");
             parsehostname(raw_hostname, hostname, port);
-            printf("host: %s port: %s\n", hostname, port);
-            printf("host %s %s\n", serveri->hostname, hostname);
             if (line_count == 0) {
                 check(strcasecmp(request_hostname, hostname) == 0,
                       "The URL specified %s != %s", request_hostname,
@@ -533,16 +508,12 @@ proxy(int sfd)
                 CLOSEFD(serveri->socketfd);
                 serveri->socketfd = make_socket(hostname, port);
                 if (serveri->socketfd == -1) {
-                    printf("cannot connect to the server\n");
+                    log_err("Cannot connect to %s", hostname);
                     send_error(client->socketfd, 503);
                     goto error;
                 }
                 FREEMEM(serveri->hostname);
                 serveri->hostname = strdup(hostname);
-            } else {
-                if (serveri->hostname != NULL)
-                    printf("%ld is reusing: %s %s",
-                           (long) getpid(), serveri->hostname, hostname);
             }
         }
 
@@ -693,7 +664,7 @@ proxy(int sfd)
     }
 
   cleanup:
-    printf("%ld finish\n", (long) getpid());
+    log_info("%ld finish", (long) getpid());
     CLOSEFD(client->socketfd);
     CLOSEFD(serveri->socketfd);
     FREEMEM(serveri->hostname);
@@ -732,28 +703,28 @@ main(int argc, char *argv[])
         *p = NULL;
     int             optval;
     int             fd = -1;
-    char           *config_path = NULL;
     char           *listen_port;
+
 
     switch (argc) {
     case 1:
         break;
     case 3:
         if (strcmp(argv[1], "-f") == 0) {
-            config_path = argv[2];
+
+            conf = config_load(argv[2]);
+            check(conf != NULL, "Cannot find configuration file.");
+            config_dump(conf);
+
             break;
         }
     default:
         return EXIT_FAILURE;
     }
 
-    conf = config_load(config_path);
-    check(conf != NULL, "Cannot find configuration file.");
-    config_dump(conf);
-
     cache_size = NUM_RECORD * sizeof(struct record);
 
-    fd = shm_open("dnscache", O_CREAT | O_EXCL | O_RDWR,
+    fd = shm_open(SHM_NAME, O_CREAT | O_EXCL | O_RDWR,
                   S_IRUSR | S_IWUSR);
     check(fd != -1, "Cannot create shared memory.");
 
@@ -765,7 +736,7 @@ main(int argc, char *argv[])
 
     *((struct record **) addr) = NULL;
 
-    sem = sem_open("dnscachesem", O_CREAT | O_EXCL, S_IRUSR | S_IWUSR, 1);
+    sem = sem_open(SEM_NAME, O_CREAT | O_EXCL | O_RDWR, S_IRUSR | S_IWUSR, 1);
     check(sem != SEM_FAILED, "Cannot create semaphores.");
     memset(addr, 0, cache_size);
 
@@ -809,10 +780,7 @@ main(int argc, char *argv[])
         break;
     }
 
-    if (p == NULL) {
-        fprintf(stderr, "server: failed to bind\n");
-        goto error;
-    }
+    check(p != NULL, "Failed to bind\n");
 
     freeaddrinfo(servinfo);
 
