@@ -75,12 +75,17 @@
 #define SHM_NAME "dnscache_shm"
 #define SEM_NAME "dnscache_sem"
 
+#define HOSTNAME_LENGTH 200
+#define PORT_LENGTH     90
+
 /*
  * HTTP/1.1 100 Continue is the ONLY response from the server that allows the
  * client to send the rest of the request.
  */
 #define HTTP_CONTINUE_MESSAGE        "HTTP/1.1 100 Continue\r\n\r\n"
 #define HTTP_CONTINUE_MESSAGE_LENGTH strlen(HTTP_CONTINUE_MESSAGE)
+
+#define RECV(S, B, C) recv(S, B, C, 0)
 
 struct peer {
     int             socketfd;   /* Socket file descriptor */
@@ -157,7 +162,7 @@ childSigHandler(int sig)
          * may not be fully released. Its parent should use exit(2) to
          * terminate and releases the resources (e.g., file descriptors).
          ******************************************************************/
-        _exit(0);
+        _exit(EXIT_FAILURE);
     }
 }
 
@@ -343,9 +348,16 @@ extract(char *hostname, char *port, const char *line)
 void
 proxy(int sfd)
 {
+    /*
+     * Peers information
+     */
     struct peer    *client = NULL;
-    struct peer    *serveri = NULL;
+    struct peer    *server = NULL;
 
+    /*
+     * Variables for select()
+     */
+    struct timeval  tv;
     fd_set          master,
                     read_fds;
     int             fdmax;
@@ -353,14 +365,21 @@ proxy(int sfd)
     int             byte_count,
                     line_count;
 
-    char           *raw_hostname = NULL,
-        *hostname = NULL,
+    /*
+     * Hostname and port from Host filed
+     */
+    char           *hostname = NULL,
         *port = NULL;
 
+    /*
+     * Hostname and port from Request-line.
+     */
     char           *request_hostname = NULL,
         *request_port = NULL;
 
-    struct timeval  tv;
+    /*
+     * Rate-limiting related variables
+     */
     int             rate;
     int             factor;
 
@@ -369,11 +388,19 @@ proxy(int sfd)
     time_t          prev_second;
     suseconds_t     prev_usecond;
     int             sleep_time;
+
+    /*
+     * If the server sends actual response
+     */
     int             content_flag;
 
     struct config_sect *p;
 
     signal(SIGTERM, childSigHandler);
+
+    /*
+     * Initialise variables
+     */
 
     client = malloc(sizeof(*client));
     check_mem(client);
@@ -384,25 +411,25 @@ proxy(int sfd)
     check_mem(client->buffer);
     client->bytes_read = 0;
 
-    serveri = malloc(sizeof(*serveri));
-    check_mem(serveri);
-    memset(serveri, 0, sizeof(*serveri));
+    server = malloc(sizeof(*server));
+    check_mem(server);
+    memset(server, 0, sizeof(*server));
 
-    serveri->socketfd = -1;
-    serveri->buffer = malloc(BUFFER_SIZE);
-    check_mem(serveri->buffer);
-    serveri->bytes_read = 0;
+    server->socketfd = -1;
+    server->buffer = malloc(BUFFER_SIZE);
+    check_mem(server->buffer);
+    server->bytes_read = 0;
 
-    hostname = malloc(200);
+    hostname = malloc(HOSTNAME_LENGTH);
     check_mem(hostname);
 
-    port = malloc(20);
+    port = malloc(PORT_LENGTH);
     check_mem(port);
 
-    request_hostname = malloc(200);
+    request_hostname = malloc(HOSTNAME_LENGTH);
     check_mem(request_hostname);
 
-    request_port = malloc(200);
+    request_port = malloc(PORT_LENGTH);
     check_mem(request_port);
 
   start:
@@ -425,8 +452,12 @@ proxy(int sfd)
 
     for (;;) {
         read_fds = master;
-        select(fdmax + 1, &read_fds, NULL, NULL, &tv);
+        check(select(fdmax + 1, &read_fds, NULL, NULL, &tv) != -1,
+              "select() fails");
 
+        /*
+         * Timeout
+         */
         if (!FD_ISSET(client->socketfd, &read_fds)) {
             goto error;
         }
@@ -438,9 +469,15 @@ proxy(int sfd)
 
         check(byte_count != -1, "Cannot read.");
 
+        /*
+         * Client closes the connection.
+         */
         if (byte_count == 0)
             goto cleanup;
 
+        /*
+         * HTTP Request-Line
+         */
         if (line_count == 0) {
             byte_count =
                 process_request_line(request_hostname, request_port,
@@ -469,53 +506,85 @@ proxy(int sfd)
         if (strncasecmp
             (client->buffer + client->bytes_read, HOST_PREFIX,
              HOST_PREFIX_LENGTH) == 0) {
-            memset(hostname, 0, sizeof(*hostname));
-            memset(port, 0, sizeof(*port));
             extract(hostname, port, client->buffer + client->bytes_read);
-            if (line_count == 1) {
-                check(strcasecmp(request_hostname, hostname) == 0,
-                      "The URL specified %s != %s", request_hostname,
-                      hostname);
-                check(strcasecmp(request_port, port) == 0,
-                      "The URL specified %s != %s", request_port, port);
+            /*
+             * Check if the request line is seen
+             */
+            if (strlen(request_hostname) == 0
+                || strlen(request_hostname) == 0) {
+                send_error(client->socketfd, 503);
+                goto error;
             }
-            if (serveri->socketfd == -1
-                || strcasecmp(serveri->hostname, hostname) != 0) {
+            /*
+             * Consistence check
+             */
+            check(strcasecmp(request_hostname, hostname) == 0,
+                  "Hostname is consistent");
+
+            check(strcasecmp(request_port, port) == 0,
+                  "Port is inconsistent");
+
+            /*
+             * Do we need a new socket?
+             * We should, if:
+             * a) We have not established a connection to any server, or
+             * b) We have established a connection to a server whose hostname
+             *    is different from this request.
+             */
+            if (server->socketfd == -1
+                || strcasecmp(server->hostname, hostname) != 0) {
                 /*
                  * Safely close existing socket file descriptor.
                  */
-                CLOSEFD(serveri->socketfd);
-                serveri->socketfd = make_socket(hostname, port);
-                if (serveri->socketfd == -1) {
+                CLOSEFD(server->socketfd);
+                server->socketfd = make_socket(hostname, port);
+                if (server->socketfd == -1) {
                     log_err("Cannot connect to %s", hostname);
                     send_error(client->socketfd, 503);
                     goto error;
                 }
-                FREEMEM(serveri->hostname);
-                serveri->hostname = strdup(hostname);
+                FREEMEM(server->hostname);
+                strcpy(server->hostname, hostname);
             }
         }
 
         client->bytes_read += byte_count;
 
-        if (byte_count == 2) {
+        /*
+         * I don't care if this line is actually "\r\n". I just need a way to
+         * `break` this infinite loop.
+         */
+        if (byte_count == 2)
             break;
-        }
-
     }
 
-    check((serveri->socketfd != -1), "Cannot connect to the real server.");
-    check(send(serveri->socketfd, client->buffer, client->bytes_read, 0) ==
+    /*
+     * Check for error.
+     */
+    check((server->socketfd != -1), "Cannot connect to the real server.");
+
+    /*
+     * Send the content in the buffer to the server.
+     */
+    check(send(server->socketfd, client->buffer, client->bytes_read, 0) ==
           client->bytes_read, "Failed to send.");
+
+    /*
+     * Reset the count.
+     */
     client->bytes_read = 0;
 
+
+    /*
+     * Get the rate.
+     */
     p = conf;
     size_t          largest = 0;
     while (p != NULL) {
         if (strcasecmp(p->name, "rates") == 0) {
             struct config_token *token = p->tokens;
             while (token != NULL) {
-                if (endswith(serveri->hostname, token->token, 1)
+                if (endswith(server->hostname, token->token, 1)
                     == 0 && strlen(token->token) > largest) {
                     largest = strlen(token->token);
                     rate = atoi(token->value);
@@ -528,20 +597,24 @@ proxy(int sfd)
     }
 
     FD_ZERO(&master);
-    FD_SET(serveri->socketfd, &master);
-
+    FD_SET(server->socketfd, &master);
     FD_SET(client->socketfd, &master);
-    fdmax = max(serveri->socketfd, client->socketfd);
-
-    content_flag = 1;
+    fdmax = max(server->socketfd, client->socketfd);
 
     tv.tv_sec = 5;
     tv.tv_usec = 0;
 
-    factor = USECOND_PER_SECOND / rate;
+    if (rate != -1)
+        factor = USECOND_PER_SECOND / rate;
+    else
+        factor = 0;
+
     memset(&ts, 0, sizeof(ts));
 
     for (;;) {
+        /*
+         * Start a timer.
+         */
         gettimeofday(&current_time, NULL);
 
         read_fds = master;
@@ -549,21 +622,21 @@ proxy(int sfd)
         check(select(fdmax + 1, &read_fds, NULL, NULL, &tv) != -1,
               "Cannot select.");
 
-        if (FD_ISSET(serveri->socketfd, &read_fds)) {
+        if (FD_ISSET(server->socketfd, &read_fds)) {
 
             tv.tv_sec = 2;
 
-            if (rate == -1) {
-                byte_count = recv(serveri->socketfd,
-                                  serveri->buffer, KBYTES_TO_BYTES(10), 0);
-            } else {
-                byte_count = recv(serveri->socketfd,
-                                  serveri->buffer,
+            if (rate == -1)
+                byte_count = recv(server->socketfd,
+                                  server->buffer, KBYTES_TO_BYTES(10), 0);
+            else
+                byte_count = recv(server->socketfd,
+                                  server->buffer,
                                   KBYTES_TO_BYTES(rate), 0);
-            }
 
             check(byte_count != -1,
                   "Error when receiving data from the real server.");
+
             if (byte_count == 0)
                 goto cleanup;
 
@@ -572,24 +645,30 @@ proxy(int sfd)
              * client to write.
              */
             if (byte_count == HTTP_CONTINUE_MESSAGE_LENGTH &&
-                strncasecmp(serveri->buffer, HTTP_CONTINUE_MESSAGE,
-                            HTTP_CONTINUE_MESSAGE_LENGTH) == 0) {
+                strncasecmp(server->buffer, HTTP_CONTINUE_MESSAGE,
+                            HTTP_CONTINUE_MESSAGE_LENGTH) == 0)
                 content_flag = 0;
-            } else {
+            else
                 content_flag = 1;
-            }
 
             byte_count =
-                send(client->socketfd, serveri->buffer, byte_count, 0);
+                send(client->socketfd, server->buffer, byte_count, 0);
             check(byte_count != -1,
                   "Error when sending data to the client.");
             if (byte_count == 0)
                 goto cleanup;
 
+            /*
+             * Get the elapsed time
+             */
             prev_second = current_time.tv_sec;
             prev_usecond = current_time.tv_usec;
+
             gettimeofday(&current_time, NULL);
 
+            /*
+             * Use nanosleep(2) to tune the speed to `rate`.
+             */
             if (rate != -1) {
                 sleep_time =
                     (useconds_t) (factor *
@@ -630,14 +709,15 @@ proxy(int sfd)
                 goto cleanup;
 
             byte_count =
-                send(serveri->socketfd, client->buffer, byte_count, 0);
+                send(server->socketfd, client->buffer, byte_count, 0);
             check(byte_count != -1,
                   "Error when sending data to the server.");
-            if (byte_count == 0)
+
+            if (byte_count == -1)
                 goto cleanup;
 
             continue;
-        } else {
+        } else {                /* Timeout */
             break;
         }
     }
@@ -645,13 +725,12 @@ proxy(int sfd)
   cleanup:
     log_info("%ld finish", (long) getpid());
     CLOSEFD(client->socketfd);
-    CLOSEFD(serveri->socketfd);
-    FREEMEM(serveri->hostname);
+    CLOSEFD(server->socketfd);
+    FREEMEM(server->hostname);
     FREEMEM(client->buffer);
-    FREEMEM(serveri->buffer);
+    FREEMEM(server->buffer);
     FREEMEM(client);
-    FREEMEM(serveri);
-    FREEMEM(raw_hostname);
+    FREEMEM(server);
     FREEMEM(hostname);
     FREEMEM(port);
     config_destroy(conf);
@@ -659,13 +738,12 @@ proxy(int sfd)
 
   error:
     CLOSEFD(client->socketfd);
-    CLOSEFD(serveri->socketfd);
-    FREEMEM(serveri->hostname);
+    CLOSEFD(server->socketfd);
+    FREEMEM(server->hostname);
     FREEMEM(client->buffer);
-    FREEMEM(serveri->buffer);
+    FREEMEM(server->buffer);
     FREEMEM(client);
-    FREEMEM(serveri);
-    FREEMEM(raw_hostname);
+    FREEMEM(server);
     FREEMEM(hostname);
     FREEMEM(port);
     config_destroy(conf);
