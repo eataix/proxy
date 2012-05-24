@@ -48,8 +48,10 @@
 #include "config.h"
 #include "utils.h"
 
+#ifdef __OPENSSL_SUPPORT__
 #include "common.h"
 #include "server.h"
+#endif
 
 /*
  * RFC 2616 3.2.2
@@ -85,8 +87,6 @@
  */
 #define HTTP_CONTINUE_MESSAGE        "HTTP/1.1 100 Continue\r\n\r\n"
 #define HTTP_CONTINUE_MESSAGE_LENGTH strlen(HTTP_CONTINUE_MESSAGE)
-
-#define __OPENSSL_SUPPORT__
 
 struct peer {
     int             socketfd;   /* Socket file descriptor */
@@ -524,9 +524,15 @@ proxy(int sfd)
         /*
          * Timeout
          */
-        if (!FD_ISSET(client->socketfd, &read_fds) && SSL_pending(ssl)) {
-            log_info("timeout");
-            goto error;
+        if (!FD_ISSET(client->socketfd, &read_fds)) {
+#ifdef __OPENSSL_SUPPORT__
+            if (!SSL_pending(ssl)) {
+#endif
+                log_info("timeout");
+                goto error;
+#ifdef __OPENSSL_SUPPORT__
+            }
+#endif
         }
 #ifndef __OPENSSL_SUPPORT__
         byte_count = readLine(client->socketfd,
@@ -775,7 +781,7 @@ proxy(int sfd)
                 send(client->socketfd, server->buffer, byte_count, 0);
 #else
             byte_count = BIO_write(io, server->buffer, byte_count);
-            BIO_flush(io);
+            check(BIO_flush(io) >= 0, "Error flushing BIO");
 #endif
 
             if (byte_count == -1) {
@@ -818,7 +824,9 @@ proxy(int sfd)
             continue;
 
         } else if (FD_ISSET(client->socketfd, &read_fds)) {
+#ifdef __OPENSSL_SUPPORT__
           read_client:
+#endif
             /*
              *
              * RFC 2616 Section 8.1.1

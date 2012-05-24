@@ -34,8 +34,6 @@
 #include "common.h"
 #include "server.h"
 
-#define __OPENSSL_SUPPORT__
-
 ssize_t
 #ifdef __OPENSSL_SUPPORT__
 readLine(BIO * io, void *buffer, size_t n)
