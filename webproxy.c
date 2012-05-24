@@ -59,6 +59,8 @@
  */
 #define DEFAULT_PORT "80"
 
+#define DEFAULT_TTL  600
+
 #define NUM_RECORD              100
 
 #define RECORD_HOSTNAME_LENGTH  30
@@ -312,6 +314,42 @@ make_socket(const char *name, const char *port)
     freeaddrinfo(ai);
     sem_post(sem);
     return -1;
+}
+
+void
+docleaner(void)
+{
+    int             ttl;
+    char           *p;
+    struct record  *r;
+    struct timeval  tv;
+    p = config_get_value(conf, "default", "ttl", 1);
+
+    signal(SIGTERM, childSigHandler);
+
+    if (p == NULL)
+        ttl = DEFAULT_TTL;
+    else
+        ttl = (int) strtol(p, (char **) NULL, 10);
+
+    if (ttl < 60) {
+        log_warn("TTL is too small. I will now set it to 60s.");
+        ttl = 60;
+    }
+
+    for (;;) {
+        sleep(ttl / 2);
+        r = (struct record *) addr;
+        gettimeofday(&tv, NULL);
+        sem_wait(sem);
+        while ((char *) r - addr < cache_size) {
+            if (tv.tv_sec - r->tv.tv_sec > ttl) {
+                memset(r, 0, sizeof(*r));
+            }
+            r++;
+        }
+        sem_post(sem);
+    }
 }
 
 /*
@@ -1026,6 +1064,18 @@ main(int argc, char *argv[])
 
     check(listen(sfd, 10) != -1, "Cannot listen");
 
+    switch (fork()) {
+    case 0:
+        docleaner();
+        _exit(EXIT_SUCCESS);
+    case -1:
+        log_err("Cannot fork()");
+        goto error;
+    default:
+        break;
+
+    }
+
     while (1) {
         check((newfd = accept(sfd, NULL, NULL)) != -1, "cannot accept");
 
@@ -1049,6 +1099,8 @@ main(int argc, char *argv[])
             proxy(newfd);
 #endif
             break;
+        case -1:
+            goto error;
         default:
             close(newfd);
         }

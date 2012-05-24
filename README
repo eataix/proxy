@@ -1,0 +1,123 @@
+A rate-limiting HTTP proxy
+
+This is just another simple HTTP/1.1 proxy with these features:
+
+1. HTTP/1.1 Persistent Connections support.
+2. Rate-limiting.
+3. Configuration file.
+4. DNS caching.
+5. Encryption connection with the client.
+
+K.I.S.S
+
+1. HTTP/1.1 Persistent Connections
+
+I mean it, this proxy handles this problem like a charm.
+
+According to RFC 2616 Section 8.1.2, "A significant difference between HTTP/1.1
+and earlier versions of HTTP is that persistent connections are the default
+behavior of any HTTP connection."
+
+The client may establish one connection with the proxy and send many HTTP
+requests. The requests may not be for the same host/server. How should the
+proxy knows if a HTTP request/response pair finishes and a new connection (may
+be to a different host) should be established? There is no simple way.
+
+There are three options.
+
+a) The proxy "looks" into everything the client sends and establishes a new
+connection if the data contains something APPEARS to be a HTTP request header.
+
+b) The proxy just closes the connection when it receives the response from the
+server and echoes the response to the client.
+
+c) Utilises the "Connection" header field. Modifies its value to "closed".
+
+d) Use this loop
+        i)   Read header from the client and sends it to the server.
+        ii)  Read content from the client and sends it to the server.
+        iii) Read the response from the server and sends it to the client.
+        iv)  If the client sends more data, go back to i) because the data
+        belongs to the next request. If not, close the connection.
+
+Option a) sucks because it is slow. Option b) sucks because if directly
+violates RFC. Option c) sucks because the programmer just chickens out. Option
+d) is the best (among these four). But I will not use it because it requires
+calculation if ii) actually finishes, which can be tricky. RFC 2616 has a whole
+section (4.4) on this topic.
+
+Here is my solution:
+
+        i)   Read the HTTP headers in the request, determine the URL and attempt
+        to connect to the server in the URL.
+        ii)  Then simply echo bytes back and forth, using a loop with a
+        select(2) call.
+        iii) Go to i) if the proxy has echoed a ACTUAL response from the server
+        to the client and the client sends more data. Exists if the connections
+        are closed.
+
+By "ACTUAL response", I mean any response except "HTTP/1.1 100 Continue". Check
+RFC 2616 for more information.
+
+If the server sends 100, the following data from the client is likely to belong
+to this request. If the server sends any other response, the following data
+from the client MUST belong to the next request.
+
+Problem solved. I don't need to spy into every single bytes of data the client
+sends, I am not violating RFC 2616, I do NOT rewrite any single byte of the
+data, and I don't need to do the tricky "Message-Length" calculation.
+
+"A client that supports persistent connections MAY "pipeline" its requests
+(i.e., send multiple requests without waiting for each response). A server MUST
+send its responses to those requests in the same order that the requests were
+received."
+
+2. Rate-limiting
+
+Just use usleep(3) or nanosleep(2).
+
+This is everything about the rate-limiting.
+
+Oh, I have add some calibration mechanism to the calculation of how much time
+the proxy should sleep.
+
+3. Configuration file
+Thank you Bob. I did not spend too much time on this.
+
+4. DNS cache
+
+I use POSIX shared memory to store the records across different child processes
+and POSIX semaphore to control the access to the shared memory.
+
+For the size of this small (less than 1000 records), the choice of algorithms
+does not too matter. I use a (over)simplified version of hash table. It is
+simplified in the sense that the collision resolution is overwriting the
+existing cache.
+
+Strengths:
+        1. Easy to follow/understand.
+        2. The content of the shared memory and the semaphore can be examined
+        using any text editor at anytime. You can find two files under
+        /dev/shm, one is for the shared memory and the other is for the
+        semaphore. It is easy to debug for programmer.
+        3. The semaphore is not perfect, but is effective. Writing will "block"
+        reading.
+
+Weakness:
+        1. The collision resolution is, hmm, too simple. There may be race
+        condition in the real world. It can be mitigated by increasing the
+        number of cached record or implementing a robust collision resolution
+        algorithm.
+        2. The performance of the proxy may not be good during the first few
+        minutes after start-up because 
+
+5. Encryption
+
+I DO NOT KNOW WHAT THE QUESTION IS ASKING. I have no clue about how "implement
+an SSL connection back to the client" should be done. The server has no chance
+to initialise an SSL connection back to the client. Should I redirect (302)
+all the request to http address, say, http://example.com, to its https
+counterpart, https://example.com, and the client will initialise an SSL
+connection to the proxy. Or, the client will tunnel the HTTP request through an
+encrypted connection (something like the wclient in Lab 5)? I don't know... I
+tried the later one and it somehow works.
