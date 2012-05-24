@@ -48,6 +48,9 @@
 #include "config.h"
 #include "utils.h"
 
+#include "common.h"
+#include "server.h"
+
 /*
  * RFC 2616 3.2.2
  * "If the port is empty or not given, port 80 is assumed."
@@ -83,7 +86,7 @@
 #define HTTP_CONTINUE_MESSAGE        "HTTP/1.1 100 Continue\r\n\r\n"
 #define HTTP_CONTINUE_MESSAGE_LENGTH strlen(HTTP_CONTINUE_MESSAGE)
 
-#define RECV(S, B, C) recv(S, B, C, 0)
+#define __OPENSSL_SUPPORT__
 
 struct peer {
     int             socketfd;   /* Socket file descriptor */
@@ -155,17 +158,21 @@ childSigHandler(int sig)
          * Clean up.
          */
         log_warn("Child process %ld is existing.", (long) getpid);
-        /****************************** WARNING ****************************
-         * The child process uses _exit(2) to terminate. The resources
-         * may not be fully released. Its parent should use exit(2) to
-         * terminate and releases the resources (e.g., file descriptors).
-         ******************************************************************/
+                /****************************** WARNING ****************************
+                 * The child process uses _exit(2) to terminate. The resources
+                 * may not be fully released. Its parent should use exit(2) to
+                 * terminate and releases the resources (e.g., file descriptors).
+                 ******************************************************************/
         _exit(EXIT_FAILURE);
     }
 }
 
-int
+void
+#ifdef __OPENSSL_SUPPORT__
+send_error(BIO * io, const int code)
+#else
 send_error(int sfd, const int code)
+#endif
 {
     char           *tail = "Content-length: 0\r\n"
         "Content-Type: text/html; charset=utf-8\r\n"
@@ -182,14 +189,14 @@ send_error(int sfd, const int code)
         break;
     }
 
-    puts(head);
-    if (sfd != -1) {
-        send(sfd, head, strlen(head), 0);
-        send(sfd, tail, strlen(tail), 0);
-        return 0;
-    } else {
-        return -1;
-    }
+
+#ifdef __OPENSSL_SUPPORT__
+    BIO_puts(io, head);
+    BIO_puts(io, tail);
+#else
+    send(sfd, head, strlen(head), 0);
+    send(sfd, tail, strlen(tail), 0);
+#endif
 }
 
 unsigned long
@@ -383,7 +390,11 @@ get_rate(const char *hostname)
 }
 
 void
+#ifdef __OPENSSL_SUPPORT__
+proxy(int sfd, SSL * ssl)
+#else
 proxy(int sfd)
+#endif
 {
     /*
      * Peers information
@@ -431,6 +442,15 @@ proxy(int sfd)
      */
     int             content_flag;
 
+#ifdef __OPENSSL_SUPPORT__
+    BIO            *io = NULL,
+        *ssl_bio = NULL;
+
+    io = BIO_new(BIO_f_buffer());
+    ssl_bio = BIO_new(BIO_f_ssl());
+    BIO_set_ssl(ssl_bio, ssl, BIO_CLOSE);
+    BIO_push(io, ssl_bio);
+#endif
 
     signal(SIGTERM, childSigHandler);
 
@@ -493,25 +513,39 @@ proxy(int sfd)
 
         if (select(fdmax + 1, &read_fds, NULL, NULL, &tv) == -1) {
             log_err("select() fails");
+#ifdef __OPENSSL_SUPPORT__
+            send_error(io, 503);
+#else
             send_error(client->socketfd, 503);
+#endif
             goto error;
         }
 
         /*
          * Timeout
          */
-        if (!FD_ISSET(client->socketfd, &read_fds)) {
+        if (!FD_ISSET(client->socketfd, &read_fds) && SSL_pending(ssl)) {
+            log_info("timeout");
             goto error;
         }
-
-        byte_count =
-            readLine(client->socketfd,
-                     client->buffer + client->bytes_read,
-                     KBYTES_TO_BYTES(5));
+#ifndef __OPENSSL_SUPPORT__
+        byte_count = readLine(client->socketfd,
+                              client->buffer + client->bytes_read,
+                              KBYTES_TO_BYTES(5));
+#else
+        byte_count = readLine(io, client->buffer + client->bytes_read,
+                              KBYTES_TO_BYTES(5));
+#endif
+        log_info("%d bytes is read", byte_count);
 
         if (byte_count == -1) {
             log_warn("Failed to read from the client.");
-            send_error(client->socketfd, 400);
+
+#ifdef __OPENSSL_SUPPORT__
+            send_error(io, 503);
+#else
+            send_error(client->socketfd, 503);
+#endif
             goto error;
         }
 
@@ -527,11 +561,16 @@ proxy(int sfd)
         if (line_count == 0) {
             byte_count =
                 process_request_line(request_hostname, request_port,
-                                     client->buffer +
-                                     client->bytes_read, byte_count);
+                                     client->buffer, byte_count);
             log_info("host: %s, port: %s", request_hostname, request_port);
+
             if (byte_count == -1) {
+                log_warn("The HTTP request line is malformed");
+#ifdef __OPENSSL_SUPPORT__
+                send_error(io, 400);
+#else
                 send_error(client->socketfd, 400);
+#endif
                 goto error;
             }
             line_count = 1;
@@ -558,7 +597,11 @@ proxy(int sfd)
              */
             if (strlen(request_hostname) == 0
                 || strlen(request_hostname) == 0) {
-                send_error(client->socketfd, 503);
+#ifdef __OPENSSL_SUPPORT__
+                send_error(io, 400);
+#else
+                send_error(client->socketfd, 400);
+#endif
                 goto error;
             }
             /*
@@ -566,13 +609,21 @@ proxy(int sfd)
              */
             if (strcasecmp(request_hostname, hostname) != 0) {
                 log_warn("Hostname is consistent");
+#ifdef __OPENSSL_SUPPORT__
+                send_error(io, 400);
+#else
                 send_error(client->socketfd, 400);
+#endif
                 goto error;
             }
 
             if (strcasecmp(request_port, port) != 0) {
                 log_warn("Port is inconsistent");
+#ifdef __OPENSSL_SUPPORT__
+                send_error(io, 400);
+#else
                 send_error(client->socketfd, 400);
+#endif
                 goto error;
             }
 
@@ -592,7 +643,11 @@ proxy(int sfd)
                 server->socketfd = make_socket(hostname, port);
                 if (server->socketfd == -1) {
                     log_err("Cannot connect to %s", hostname);
+#ifdef __OPENSSL_SUPPORT__
+                    send_error(io, 503);
+#else
                     send_error(client->socketfd, 503);
+#endif
                     goto error;
                 }
                 rate = get_rate(hostname);
@@ -616,7 +671,11 @@ proxy(int sfd)
      */
     if (server->socketfd == -1) {
         log_err("Cannot connect to the real server.");
+#ifdef __OPENSSL_SUPPORT__
+        send_error(io, 503);
+#else
         send_error(client->socketfd, 503);
+#endif
         goto error;
     }
 
@@ -626,27 +685,35 @@ proxy(int sfd)
     if (send(server->socketfd, client->buffer, client->bytes_read, 0) !=
         client->bytes_read) {
         log_err("Failed to send.");
+#ifdef __OPENSSL_SUPPORT__
+        send_error(io, 503);
+#else
         send_error(client->socketfd, 503);
+#endif
         goto error;
     }
 
     /*
-     * Reset the count.
+     * Reset the counts.
      */
     client->bytes_read = 0;
+    server->bytes_read = 0;
 
     FD_ZERO(&master);
     FD_SET(server->socketfd, &master);
+
+#ifdef __OPENSSL_SUPPORT__
     FD_SET(client->socketfd, &master);
     fdmax = max(server->socketfd, client->socketfd);
+#else
+    fdmax = server->socketfd;
+#endif
 
     tv.tv_sec = 5;
     tv.tv_usec = 0;
 
     if (rate != -1)
         factor = USECOND_PER_SECOND / rate;
-    else
-        factor = 0;
 
     memset(&ts, 0, sizeof(ts));
 
@@ -660,7 +727,11 @@ proxy(int sfd)
 
         if (select(fdmax + 1, &read_fds, NULL, NULL, &tv) == -1) {
             log_warn("Cannot select.");
+#ifdef __OPENSSL_SUPPORT__
+            send_error(io, 503);
+#else
             send_error(client->socketfd, 503);
+#endif
         }
 
         if (FD_ISSET(server->socketfd, &read_fds)) {
@@ -677,7 +748,11 @@ proxy(int sfd)
 
             if (byte_count == -1) {
                 log_err("Error when receiving data from the real server.");
+#ifdef __OPENSSL_SUPPORT__
+                send_error(io, 503);
+#else
                 send_error(client->socketfd, 503);
+#endif
                 goto error;
             }
 
@@ -695,12 +770,23 @@ proxy(int sfd)
             else
                 content_flag = 1;
 
+#ifndef __OPENSSL_SUPPORT__
             byte_count =
                 send(client->socketfd, server->buffer, byte_count, 0);
+#else
+            byte_count = BIO_write(io, server->buffer, byte_count);
+            BIO_flush(io);
+#endif
+
             if (byte_count == -1) {
                 log_err("Error when sending data to the client.");
+#ifdef __OPENSSL_SUPPORT__
+                send_error(io, 503);
+#else
                 send_error(client->socketfd, 503);
+#endif
             }
+
             if (byte_count == 0)
                 goto cleanup;
 
@@ -732,6 +818,7 @@ proxy(int sfd)
             continue;
 
         } else if (FD_ISSET(client->socketfd, &read_fds)) {
+          read_client:
             /*
              *
              * RFC 2616 Section 8.1.1
@@ -746,12 +833,21 @@ proxy(int sfd)
             if (content_flag == 1)
                 goto start;
 
+#ifdef __OPENSSL_SUPPORT__
+            byte_count = BIO_read(io, client->buffer, KBYTES_TO_BYTES(10));
+#else
             byte_count =
                 recv(client->socketfd, client->buffer,
                      KBYTES_TO_BYTES(10), 0);
+#endif
+
             if (byte_count == -1) {
                 log_err("Error when receiving data from the client.");
+#ifdef __OPENSSL_SUPPORT__
+                send_error(io, 503);
+#else
                 send_error(client->socketfd, 503);
+#endif
                 goto error;
             }
             if (byte_count == 0)
@@ -762,18 +858,30 @@ proxy(int sfd)
 
             if (byte_count == -1) {
                 log_err("Error when sending data to the server.");
+#ifdef __OPENSSL_SUPPORT__
+                send_error(io, 503);
+#else
                 send_error(client->socketfd, 503);
+#endif
                 goto error;
             }
 
             continue;
         } else {                /* Timeout */
+#ifdef __OPENSSL_SUPPORT__
+            if (SSL_pending(ssl))
+                goto read_client;
+#endif
+            log_info("Timeout");
             break;
         }
     }
 
   cleanup:
-    log_info("%ld finish", (long) getpid());
+#ifdef __OPENSSL_SUPPORT__
+    SSL_shutdown(ssl);
+    SSL_free(ssl);
+#endif
     CLOSEFD(client->socketfd);
     CLOSEFD(server->socketfd);
     FREEMEM(server->hostname);
@@ -787,6 +895,11 @@ proxy(int sfd)
     _exit(EXIT_SUCCESS);
 
   error:
+#ifdef __OPENSSL_SUPPORT__
+    SSL_shutdown(ssl);
+    SSL_free(ssl);
+#endif
+    log_info("Child process %ld exiting.", (long) getpid());
     CLOSEFD(client->socketfd);
     CLOSEFD(server->socketfd);
     FREEMEM(server->hostname);
@@ -812,6 +925,14 @@ main(int argc, char *argv[])
     int             fd = -1;
     char           *listen_port;
 
+#ifdef __OPENSSL_SUPPORT__
+    BIO            *sbio;
+    SSL_CTX        *ctx;
+    SSL            *ssl;
+
+    ctx = initialize_ctx(KEYFILE, PASSWORD);
+    load_dh_params(ctx, DHFILE);
+#endif
 
     switch (argc) {
     case 1:
@@ -902,7 +1023,23 @@ main(int argc, char *argv[])
 
         switch (fork()) {
         case 0:
+
+#ifdef __OPENSSL_SUPPORT__
+            sbio = BIO_new_socket(newfd, BIO_NOCLOSE);
+            ssl = SSL_new(ctx);
+            SSL_set_bio(ssl, sbio, sbio);
+            switch (SSL_accept(ssl)) {
+            case 1:
+                proxy(newfd, ssl);
+                break;
+            default:
+                log_info("SSL handshake failed, "
+                         "fall back to unencrypted connection");
+                _exit(EXIT_FAILURE);
+            }
+#else
             proxy(newfd);
+#endif
             break;
         default:
             close(newfd);
@@ -912,7 +1049,8 @@ main(int argc, char *argv[])
     return EXIT_SUCCESS;
 
   error:
-    shm_unlink("dnscache");
+    shm_unlink(SHM_NAME);
+    sem_unlink(SEM_NAME);
     CLOSEFD(sfd);
     freeaddrinfo(servinfo);
     return EXIT_FAILURE;

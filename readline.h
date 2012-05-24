@@ -30,5 +30,16 @@
 #include <unistd.h>
 #include <errno.h>
 
-ssize_t         readLine(int fd, void *buffer, size_t n);
+#include "common.h"
+#include "server.h"
+
+#define __OPENSSL_SUPPORT__
+
+ssize_t
+#ifdef __OPENSSL_SUPPORT__
+readLine(BIO * io, void *buffer, size_t n);
+#else
+                readLine(int sfd, void *buffer, size_t n);
+#endif
+
 #endif                          /* READLINE_H_ */

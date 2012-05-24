@@ -1,12 +1,13 @@
 #flags
 CC = clang
-CFLAGS = -Wall -g -Wextra -std=c99
+CFLAGS = -Wall -g -Wextra 
+LD = -L/usr/lib -lssl -lcrypto -pthread -lrt -I/usr/include
 
 #targets
 all: webproxy
 
-webproxy: webproxy.o config.o readline.o utils.o
-	$(CC) $(CFLAGS) -o $@ $^
+webproxy: webproxy.o config.o readline.o utils.o server.o common.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LD)
 
 webproxy.o: webproxy.c
 	$(CC) $(CFLAGS) -c $ webproxy.c
