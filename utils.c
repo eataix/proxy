@@ -29,7 +29,6 @@
 #include <ctype.h>
 #include <stdio.h>
 
-#include "dbg.h"
 #include "http.h"
 #include "utils.h"
 
@@ -47,7 +46,8 @@ process_request_line(char *hostname, char *port, char *buffer,
 
     while (*p++ != ' ');
 
-    check(isalnum(*p) || *p == '*', "Invalid format");
+    if (!isalnum(*p) && *p != '*')
+        return -1;
 
     b = p;
 
@@ -57,7 +57,6 @@ process_request_line(char *hostname, char *port, char *buffer,
      */
     if (strncasecmp(p, HTTP_SCHEME_PREFIX, strlen(HTTP_SCHEME_PREFIX))
         != 0) {
-        log_info("Not absolute url. %c", *p);
         return count;
     }
 
@@ -96,8 +95,6 @@ process_request_line(char *hostname, char *port, char *buffer,
     } while (*(b - 1) != '\n' && *(b - 2) != '\r');
 
     return b - buffer;
-  error:
-    return -1;
 }
 
 BOOLEAN
@@ -125,4 +122,51 @@ endswith(const char *s1, const char *s2, const int caseinsensitive)
         else
             return FALSE;
     }
+}
+
+
+/*
+ * Extracts the value of HTTP header.
+ */
+int
+extract(char *hostname, char *port, const char *line)
+{
+
+    char           *h,
+                   *p;
+
+    const char     *ch;
+
+    h = hostname;
+    p = port;
+    ch = line;
+
+    /*
+     * RFC 2616 Section 4.2
+     *
+     * Each header field consists of a name followed by a colon (":") and the
+     * field value. Field names are case-insensitive. The field value MAY be
+     * preceded by any amount of LWS, though a single SP is preferred.
+     */
+
+    while (*ch != ' ' && *ch != '\t')
+        ch++;
+
+    while (*ch == ' ' || *ch == '\t')
+        ch++;
+
+    while (*ch != ':' && *ch != '\r')
+        *h++ = *ch++;
+    *h = '\0';
+
+    if (*ch == ':') {
+        ch++;
+        while (isdigit(*ch))
+            *p++ = *ch++;
+        *p = '\0';
+    } else {
+        strcpy(p, DEFAULT_PORT);
+    }
+
+    return 0;
 }

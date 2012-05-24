@@ -50,4 +50,7 @@ int             process_request_line(char *hostname, char *port,
 BOOLEAN         endswith(const char *s1, const char *s2,
                          const int caseinsensitive);
 
+int
+                extract(char *hostname, char *port, const char *line);
+
 #endif                          /* STRUTILS_H_ */

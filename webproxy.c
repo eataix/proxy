@@ -92,6 +92,8 @@ struct record {
 
 struct config_sect *conf = NULL;
 
+int             debug_level = 0;
+
 /*
  * Posix Shared Memory
  */
@@ -179,6 +181,9 @@ send_error(int sfd, const int code)
 #endif
 }
 
+/*
+ * REF: http://www.cse.yorku.ca/~oz/hash.html
+ */
 unsigned long
 hash(const unsigned char *str)
 {
@@ -330,51 +335,6 @@ docleaner(void)
     }
 }
 
-/*
- * Extracts the value of HTTP header.
- */
-int
-extract(char *hostname, char *port, const char *line)
-{
-
-    char           *h,
-                   *p;
-
-    const char     *ch;
-
-    h = hostname;
-    p = port;
-    ch = line;
-
-    /*
-     * RFC 2616 Section 4.2
-     *
-     * Each header field consists of a name followed by a colon (":") and the
-     * field value. Field names are case-insensitive. The field value MAY be
-     * preceded by any amount of LWS, though a single SP is preferred.
-     */
-
-    while (*ch != ' ' && *ch != '\t')
-        ch++;
-
-    while (*ch == ' ' || *ch == '\t')
-        ch++;
-
-    while (*ch != ':' && *ch != '\r')
-        *h++ = *ch++;
-    *h = '\0';
-
-    if (*ch == ':') {
-        ch++;
-        while (isdigit(*ch))
-            *p++ = *ch++;
-        *p = '\0';
-    } else {
-        strcpy(p, DEFAULT_PORT);
-    }
-
-    return 0;
-}
 
 int
 get_rate(const char *hostname)
