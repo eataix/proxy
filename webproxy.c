@@ -43,52 +43,32 @@
 #include <time.h>
 #include <unistd.h>
 
-#include "dbg.h"
-#include "readline.h"
 #include "config.h"
+#include "dbg.h"
+#include "http.h"
+#include "readline.h"
 #include "utils.h"
+
+#ifndef _POSIX_C_SOURCE
+#define _POSIX_C_SOURCE
+#endif
 
 #ifdef __OPENSSL_SUPPORT__
 #include "common.h"
 #include "server.h"
 #endif
 
-/*
- * RFC 2616 3.2.2
- * "If the port is empty or not given, port 80 is assumed."
- */
-#define DEFAULT_PORT "80"
-
 #define DEFAULT_TTL  600
-
 #define NUM_RECORD              100
-
-#define RECORD_HOSTNAME_LENGTH  30
+#define RECORD_HOSTNAME_LENGTH  50
 
 #define BUFFER_SIZE INT16_MAX
 #define USECOND_PER_SECOND 1000000
 #define BYTES_TO_KBYTES(A) (A / 1024)
 #define KBYTES_TO_BYTES(A) (A * 1024)
 
-#ifndef _POSIX_C_SOURCE
-#define _POSIX_C_SOURCE
-#endif
-
-#define HOST_PREFIX        "Host:"
-#define HOST_PREFIX_LENGTH strlen(HOST_PREFIX)
-
 #define SHM_NAME "dnscache_shm"
 #define SEM_NAME "dnscache_sem"
-
-#define HOSTNAME_LENGTH 200
-#define PORT_LENGTH     90
-
-/*
- * HTTP/1.1 100 Continue is the ONLY response from the server that allows the
- * client to send the rest of the request.
- */
-#define HTTP_CONTINUE_MESSAGE        "HTTP/1.1 100 Continue\r\n\r\n"
-#define HTTP_CONTINUE_MESSAGE_LENGTH strlen(HTTP_CONTINUE_MESSAGE)
 
 struct peer {
     int             socketfd;   /* Socket file descriptor */
@@ -162,8 +142,8 @@ childSigHandler(int sig)
         log_warn("Child process %ld is existing.", (long) getpid);
                 /****************************** WARNING ****************************
                  * The child process uses _exit(2) to terminate. The resources
-                 * may not be fully released. Its parent should use exit(2) to
-                 * terminate and releases the resources (e.g., file descriptors).
+                 * may not be fully released. Its parent must use exit(2) to
+                 * terminate in order to releases resources.
                  ******************************************************************/
         _exit(EXIT_FAILURE);
     }
@@ -176,18 +156,16 @@ send_error(BIO * io, const int code)
 send_error(int sfd, const int code)
 #endif
 {
-    char           *tail = "Content-length: 0\r\n"
-        "Content-Type: text/html; charset=utf-8\r\n"
-        "Server: '; DROP TABLE servertypes; --\r\n"
-        "Connection: close\r\n\r\n";
     char           *head;
+    char           *tail = RESPONSE_HEADER_TAIL;
+
     switch (code) {
     case 503:
-        head = "HTTP/1.1 503 SERVICE UNAVAILABLE\r\n";
+        head = RESPONSE_503_HEAD;
         break;
     case 400:
     default:
-        head = "HTTP/1.1 400 BAD REQUEST\r\n";
+        head = RESPONSE_400_HEAD;
         break;
     }
 
@@ -937,6 +915,8 @@ proxy(int sfd)
     FREEMEM(server);
     FREEMEM(hostname);
     FREEMEM(port);
+    FREEMEM(request_hostname);
+    FREEMEM(request_port);
     config_destroy(conf);
     _exit(EXIT_SUCCESS);
 
@@ -955,6 +935,8 @@ proxy(int sfd)
     FREEMEM(server);
     FREEMEM(hostname);
     FREEMEM(port);
+    FREEMEM(request_hostname);
+    FREEMEM(request_port);
     config_destroy(conf);
     _exit(EXIT_FAILURE);
 }
