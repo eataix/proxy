@@ -46,7 +46,7 @@ OPENSSL_SOURCES := server.c, common.c
 CC              := clang # I highly recommend clang
 
 # ------------  compiler flags  ------------------------------------------------
-DEBUG_CFLAGS    := -Wall -std=gnu99 -g -Wstrict-prototypes -Werror -D __DEBUG__ -Wextra
+DEBUG_CFLAGS    := -Wall -std=gnu99 -g -Wstrict-prototypes -D __DEBUG__ -Wextra
 RELEASE_CFLAGS  := -Wall -std=gnu99 -O3
 OPENSSL_CFLAGS  := -D __OPENSSL_SUPPORT__
 
@@ -69,9 +69,13 @@ ifeq (YES, ${PROFILE})
 endif
 
 ifeq (YES, ${OPENSSL})
-  SOURCES      := ${SOURCES} ${OPENSSL_SOURCES}
+  SOURCES      := ${SOURCES}, ${OPENSSL_SOURCES}
   CFLAGS       := ${CFLAGS} ${OPENSSL_CFLAGS}
   LDFLAGS      := ${LDFLAGS} ${OPENSSL_LDFLAGS}
+else
+  ifeq (YES, ${DEBUG})
+    CFLAGS     := ${CFLAGS} -Werror
+  endif
 endif
 
 # ------------  additional system include directories  -------------------------
