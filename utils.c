@@ -24,13 +24,75 @@
  * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
  * POSSIBILITY OF SUCH DAMAGE.
  */
+
+#include <sys/socket.h>
+#include <sys/types.h>
+
+#include <ctype.h>
+#include <errno.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <ctype.h>
-#include <stdio.h>
+#include <unistd.h>
 
 #include "http.h"
 #include "utils.h"
+
+#ifdef __OPENSSL_SUPPORT__
+#include "common.h"
+#include "server.h"
+#endif
+
+ssize_t
+#ifdef __OPENSSL_SUPPORT__
+readLine(BIO * io, void *buffer, size_t n)
+#else
+readLine(int sfd, void *buffer, size_t n)
+#endif
+{
+    ssize_t         numRead;
+    size_t          totRead;
+    char           *buf;
+    char            ch;
+
+    if (n <= 0 || buffer == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    buf = buffer;
+
+    totRead = 0;
+
+    for (;;) {
+
+#ifdef __OPENSSL_SUPPORT__
+        numRead = BIO_read(io, &ch, 1);
+#else
+        numRead = recv(sfd, &ch, 1, 0);
+#endif
+
+        if (numRead == -1) {
+            if (errno == EINTR)
+                continue;
+            else
+                return -1;
+        } else if (numRead == 0) {
+            if (totRead == 0)
+                return 0;
+            else
+                break;
+        } else {
+            if (totRead < n) {
+                totRead++;
+                *buf++ = ch;
+            }
+            if (ch == '\n')
+                break;
+        }
+    }
+    return totRead;
+}
 
 int
 process_request_line(char *hostname, char *port, char *buffer,
@@ -97,6 +159,9 @@ process_request_line(char *hostname, char *port, char *buffer,
     return b - buffer;
 }
 
+/*
+ * This is a O(1) operation.
+ */
 BOOLEAN
 endswith(const char *s1, const char *s2, const int caseinsensitive)
 {

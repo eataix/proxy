@@ -37,7 +37,7 @@ PROFILE        := NO
 EXECUTABLE      := webproxy
 
 # ------------  list of all source files  --------------------------------------
-SOURCES         := webproxy.c, config.c, readline.c, utils.c
+SOURCES         := webproxy.c, config.c, utils.c
 
 # ------------  list of source files associated with OpenSSL support -----------
 OPENSSL_SOURCES := server.c, common.c
@@ -46,7 +46,7 @@ OPENSSL_SOURCES := server.c, common.c
 CC              := clang # I highly recommend clang
 
 # ------------  compiler flags  ------------------------------------------------
-DEBUG_CFLAGS    := -Wall -std=gnu99 -g -Wstrict-prototypes -D __DEBUG__ -Wextra
+DEBUG_CFLAGS    := -Wall -std=gnu99 -g -Wstrict-prototypes -D __DEBUG__ -Wextra -Werror
 RELEASE_CFLAGS  := -Wall -std=gnu99 -O3
 OPENSSL_CFLAGS  := -D __OPENSSL_SUPPORT__
 

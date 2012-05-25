@@ -53,4 +53,14 @@ BOOLEAN         endswith(const char *s1, const char *s2,
 int
                 extract(char *hostname, char *port, const char *line);
 
+
+ssize_t
+#ifdef __OPENSSL_SUPPORT__
+                readLine(BIO * io, void *buffer, size_t n);
+#else
+                readLine(int sfd, void *buffer, size_t n);
+#endif
+
+
+
 #endif                          /* STRUTILS_H_ */
