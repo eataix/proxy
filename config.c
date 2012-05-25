@@ -23,7 +23,7 @@
 
 #define MAX_CONF_LEN 256
 
-extern int debug_level;
+extern int      debug_level;
 
 /*
  * allocate a new [section] structure
@@ -135,9 +135,9 @@ config_load(char *filename)
     fclose(fp);
     return sects;
 
-error:
+  error:
     if (fp != NULL)
-            fclose(fp);
+        fclose(fp);
     return NULL;
 }                               /* config_load () */
 

@@ -34,6 +34,8 @@
  * "If the port is empty or not given, port 80 is assumed."
  */
 #define DEFAULT_PORT "80"
+#define DEFAULT_TTL  600
+#define NUM_RECORD              100
 
 #define HOSTNAME_LENGTH  50
 #define PORT_LENGTH      10
@@ -48,8 +50,9 @@
 #define HTTP_CONTINUE_MESSAGE        "HTTP/1.1 100 Continue\r\n\r\n"
 #define HTTP_CONTINUE_MESSAGE_LENGTH strlen(HTTP_CONTINUE_MESSAGE)
 
-#define RESPONSE_503_HEAD   "HTTP/1.1 503 SERVICE UNAVAILABLE\r\n";
 #define RESPONSE_400_HEAD   "HTTP/1.1 400 BAD REQUEST\r\n";
+#define RESPONSE_414_HEAD   "HTTP/1.1 414 REQUEST URI TOO LONG\r\n"
+#define RESPONSE_503_HEAD   "HTTP/1.1 503 SERVICE UNAVAILABLE\r\n";
 
 #define RESPONSE_HEADER_TAIL  "Content-length: 0\r\n"\
                               "Server: '; DROP TABLE servertypes; --\r\n"\

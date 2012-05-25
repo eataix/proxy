@@ -96,7 +96,7 @@ readLine(int sfd, void *buffer, size_t n)
 
 int
 process_request_line(char *hostname, char *port, char *buffer,
-                     const int count)
+                     const int count, const int use_abs)
 {
     char           *p,
                    *b,
@@ -146,6 +146,9 @@ process_request_line(char *hostname, char *port, char *buffer,
     } else {
         *pp = '\0';
     }
+
+    if (use_abs == 1)
+        return count;
 
     if (*p == ' ') {
         *b = '/';

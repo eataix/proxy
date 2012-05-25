@@ -61,12 +61,12 @@
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200112
 #endif
+
 /*
  * Default parameters
  */
-#define DEFAULT_TTL  600
-#define NUM_RECORD              100
 #define RECORD_HOSTNAME_LENGTH  50
+
 /*
  * Please do NOT change PEER_BUFFER_SIZE to a small value. If the
  * PEER_BUFFER_SIZE is too small, CPU will be interrupted too frequently and it
@@ -111,6 +111,7 @@ struct record {
 struct config_sect *conf = NULL;
 
 int             debug_level = 0;
+int             use_abs_url = 1;
 
 /*
  * Posix Shared Memory
@@ -158,11 +159,11 @@ childSigHandler(int sig)
          * Clean up.
          */
         log_warn("Child process %ld is existing.", (long) getpid);
-                /****************************** WARNING ****************************
+                /****************************** WARNING ***********************
                  * The child process uses _exit(2) to terminate. The resources
                  * may not be fully released. Its parent must use exit(2) to
                  * terminate in order to releases resources.
-                 ******************************************************************/
+                 *************************************************************/
         _exit(EXIT_FAILURE);
     }
 }
@@ -181,6 +182,8 @@ send_error(int sfd, const int code)
     case 503:
         head = RESPONSE_503_HEAD;
         break;
+    case 414:
+        head = RESPONSE_414_HEAD;
     case 400:
     default:
         head = RESPONSE_400_HEAD;
@@ -210,7 +213,7 @@ hash(const unsigned char *str)
     while ((c = *str++))
         hash = ((hash << 5) + hash) + c;
 
-    return hash % NUM_RECORD;
+    return hash % (cache_size / sizeof(struct record));
 }
 
 /*
@@ -547,7 +550,6 @@ proxy(int sfd)
         byte_count = readLine(io, client->buffer + client->bytes_read,
                               KBYTES_TO_BYTES(5));
 #endif
-        log_info("%d bytes is read", byte_count);
 
         if (byte_count == -1) {
             log_warn("Failed to read from the client.");
@@ -572,7 +574,8 @@ proxy(int sfd)
         if (line_count == 0) {
             byte_count =
                 process_request_line(request_hostname, request_port,
-                                     client->buffer, byte_count);
+                                     client->buffer, byte_count,
+                                     use_abs_url);
             log_info("host: %s, port: %s", request_hostname, request_port);
 
             if (byte_count == -1) {
@@ -668,6 +671,15 @@ proxy(int sfd)
         }
 
         client->bytes_read += byte_count;
+
+        if (client->bytes_read > PEER_BUFFER_SIZE / 2) {
+#ifdef __OPENSSL_SUPPORT__
+            send_error(io, 414);
+#else
+            send_error(client->socketfd, 414);
+#endif
+            goto error;
+        }
 
         /*
          * I don't care if this line is actually "\r\n". I just need a way to
@@ -811,6 +823,12 @@ proxy(int sfd)
 
             /*
              * Use nanosleep(2) to tune the speed to `rate`.
+             *
+             * I build a calibration mechanism here.
+             * 1. If current rate is under the rate the user wants to limit to,
+             * do NOT sleep.
+             * 2. Subtract the time spending on receiving from the server and
+             * sending to the client from the calculated sleep time.
              */
             if (rate != -1) {
                 sleep_time =
@@ -820,7 +838,12 @@ proxy(int sfd)
                      (current_time.tv_sec -
                       prev_second)) * USECOND_PER_SECOND -
                     (current_time.tv_usec - prev_usecond);
-                if (sleep_time >= 0) {
+                /*
+                 * If sleep_time is less than zero, the current speed is way
+                 * below the rate we want to limit to. Do not sleep in this
+                 * case.
+                 */
+                if (sleep_time > 0) {
                     ts.tv_nsec = sleep_time * 1000;
                     nanosleep(&ts, NULL);
                 }
@@ -885,7 +908,6 @@ proxy(int sfd)
             if (SSL_pending(ssl))
                 goto read_client;
 #endif
-            log_info("Timeout");
             break;
         }
     }
@@ -999,6 +1021,7 @@ main(int argc, char *argv[])
             conf = config_load(argv[2]);
             if (conf == NULL) {
                 log_warn("Cannot find configuration file.");
+                return EXIT_FAILURE;
             }
             break;
         }
@@ -1007,7 +1030,12 @@ main(int argc, char *argv[])
         return EXIT_FAILURE;
     }
 
-    cache_size = NUM_RECORD * sizeof(struct record);
+    ptr = config_get_value(conf, "default", "records", 1);
+    if (ptr == NULL)
+        cache_size = NUM_RECORD * sizeof(struct record);
+    else
+        cache_size =
+            (int) strtol(ptr, (char **) NULL, 10) * sizeof(struct record);
 
     fd = shm_open(SHM_NAME, O_CREAT | O_EXCL | O_RDWR, S_IRUSR | S_IWUSR);
     check(fd != -1, "Cannot create shared memory.");
@@ -1031,17 +1059,22 @@ main(int argc, char *argv[])
     hints.ai_socktype = SOCK_STREAM;
     hints.ai_flags = AI_PASSIVE;
 
+
+    ptr = config_get_value(conf, "default", "debug", 1);
+    if (ptr == NULL)
+        debug_level = 2;
+    else
+        debug_level = (int) strtol(ptr, (char **) NULL, 10);
+
+    ptr = config_get_value(conf, "default", "use_abs", 0);
+    if (ptr != NULL)
+        use_abs_url = 0;
+
     ptr = config_get_value(conf, "default", "proxy_port", 1);
     if (ptr == NULL)
         listen_port = "8080";
     else
         listen_port = ptr;
-
-    ptr = config_get_value(conf, "default", "debug_level", 1);
-    if (ptr == NULL)
-        debug_level = 2;
-    else
-        debug_level = (int) strtol(ptr, (char **) NULL, 10);
 
     check(getaddrinfo(NULL, listen_port, &hints, &servinfo) == 0,
           "cannot getaddrinfo");

@@ -45,7 +45,8 @@
 typedef enum { TRUE, FALSE } BOOLEAN;
 
 int             process_request_line(char *hostname, char *port,
-                                     char *buffer, const int count);
+                                     char *buffer, const int count,
+                                     const int use_abs);
 
 BOOLEAN         endswith(const char *s1, const char *s2,
                          const int caseinsensitive);
