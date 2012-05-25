@@ -164,6 +164,7 @@ childSigHandler(int sig)
                  * may not be fully released. Its parent must use exit(2) to
                  * terminate in order to releases resources.
                  *************************************************************/
+        config_destroy(conf);
         _exit(EXIT_FAILURE);
     }
 }
@@ -445,6 +446,8 @@ proxy(int sfd)
      * If the server sends actual response
      */
     int             content_flag;
+
+    int             chunk_size;
 
 #ifdef __OUT_OF_MIND__
     send_error(sfd, 400);
@@ -740,6 +743,11 @@ proxy(int sfd)
 
     memset(&ts, 0, sizeof(ts));
 
+    if (rate != -1)
+        chunk_size = min(PEER_BUFFER_SIZE, KBYTES_TO_BYTES(rate));
+    else
+        chunk_size = KBYTES_TO_BYTES(10);
+
     for (;;) {
         /*
          * Start a timer.
@@ -761,13 +769,8 @@ proxy(int sfd)
 
             tv.tv_sec = 2;
 
-            if (rate == -1)
-                byte_count = recv(server->socketfd,
-                                  server->buffer, KBYTES_TO_BYTES(10), 0);
-            else
-                byte_count = recv(server->socketfd,
-                                  server->buffer,
-                                  KBYTES_TO_BYTES(rate), 0);
+            byte_count = recv(server->socketfd,
+                              server->buffer, chunk_size, 0);
 
             if (byte_count == -1) {
                 log_err("Error when receiving data from the real server.");
