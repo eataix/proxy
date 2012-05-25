@@ -1,0 +1,19 @@
+VERSIONS
+========
+
+To be honest, I do not use SVN. I use Git to trace source code and import its
+history to SVN.
+
+Hence, I am unaware of the version in SVN.
+
+The version number of the final version for the main assignment is the latest
+version as at 10 minutes before the assignment is due.
+
+I undertook all the tasks. Stage 1, 2, and 3, and additional task 1 and 2.
+
+The additional task 2 is not 100% finished because I do not understand what the
+question is asking but I tried. Please read the Makefile for the instruction
+how to test it.
+
+
+- Meitian Huang, u4700480

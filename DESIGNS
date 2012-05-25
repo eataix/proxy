@@ -109,7 +109,9 @@ Weakness:
         number of cached record or implementing a robust collision resolution
         algorithm.
         2. The performance of the proxy may not be good during the first few
-        minutes after start-up because 
+        minutes after start-up because
+        3. The records can be modified by anyone (because the shared memory is
+        world readable and world writeable).
 
 5. Encryption
 
