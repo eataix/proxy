@@ -325,7 +325,7 @@ dnscleaner(void)
     char           *p;
     struct record  *r;
     struct timeval  tv;
-    p = config_get_value(conf, "default", "ttl", 1);
+    p = config_get_value(conf, "dns", "ttl", 1);
 
     signal(SIGTERM, childSigHandler);
 
@@ -1033,7 +1033,7 @@ main(int argc, char *argv[])
         return EXIT_FAILURE;
     }
 
-    ptr = config_get_value(conf, "default", "records", 1);
+    ptr = config_get_value(conf, "dns", "records", 1);
     if (ptr == NULL)
         cache_size = NUM_RECORD * sizeof(struct record);
     else
