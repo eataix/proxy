@@ -1065,11 +1065,11 @@ main(int argc, char *argv[])
 
     ptr = config_get_value(conf, "default", "debug", 1);
     if (ptr == NULL)
-        debug_level = 2;
+        debug_level = 0;
     else
         debug_level = (int) strtol(ptr, (char **) NULL, 10);
 
-    ptr = config_get_value(conf, "default", "use_abs", 0);
+    ptr = config_get_value(conf, "default", "no_abs", 0);
     if (ptr != NULL)
         use_abs_url = 0;
 
