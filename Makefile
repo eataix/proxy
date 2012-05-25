@@ -43,7 +43,7 @@ SOURCES         := webproxy.c, config.c, utils.c
 OPENSSL_SOURCES := server.c, common.c
 
 # ------------  compiler  ------------------------------------------------------
-CC              := clang # I highly recommend clang
+CC              := gcc # I highly recommend clang
 
 # ------------  compiler flags  ------------------------------------------------
 DEBUG_CFLAGS    := -Wall -std=gnu99 -g -Wstrict-prototypes -D __DEBUG__ -Wextra -Werror
