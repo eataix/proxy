@@ -19,8 +19,11 @@
 #include <string.h>
 
 #include "config.h"
+#include "dbg.h"
 
 #define MAX_CONF_LEN 256
+
+extern int debug_level;
 
 /*
  * allocate a new [section] structure
@@ -68,10 +71,7 @@ config_load(char *filename)
     char           *value;
 
     fp = fopen(filename, "r");
-    if (!fp) {
-        perror("config file");
-        return NULL;
-    }
+    check(fp != NULL, "Cannot open the specified configuration file.");
 
     while (fgets(line, MAX_CONF_LEN, fp) != NULL) {
         /*
@@ -134,6 +134,11 @@ config_load(char *filename)
     }
     fclose(fp);
     return sects;
+
+error:
+    if (fp != NULL)
+            fclose(fp);
+    return NULL;
 }                               /* config_load () */
 
 char           *
