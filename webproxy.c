@@ -46,29 +46,44 @@
 #include "config.h"
 #include "dbg.h"
 #include "http.h"
-#include "readline.h"
 #include "utils.h"
-
-#ifndef _POSIX_C_SOURCE
-#define _POSIX_C_SOURCE
-#endif
 
 #ifdef __OPENSSL_SUPPORT__
 #include "common.h"
 #include "server.h"
 #endif
 
+/*
+ * Feature testing macros
+ * I want header files to expose only the definitions (constants, function
+ * prototypes, and so on) that follow POSIX.1-2001.
+ */
+#ifndef _POSIX_C_SOURCE
+#define _POSIX_C_SOURCE 200112
+#endif
+/*
+ * Default parameters
+ */
 #define DEFAULT_TTL  600
 #define NUM_RECORD              100
 #define RECORD_HOSTNAME_LENGTH  50
-
-#define BUFFER_SIZE INT16_MAX
-#define USECOND_PER_SECOND 1000000
-#define BYTES_TO_KBYTES(A) (A / 1024)
-#define KBYTES_TO_BYTES(A) (A * 1024)
+/*
+ * Please do NOT change PEER_BUFFER_SIZE to a small value. If the
+ * PEER_BUFFER_SIZE is too small, CPU will be interrupted too frequently and it
+ * will do too many context switches, which can be expensive and lead to higher
+ * CPU usage.
+ */
+#define PEER_BUFFER_SIZE INT16_MAX
 
 #define SHM_NAME "dnscache_shm"
 #define SEM_NAME "dnscache_sem"
+
+/*
+ * Units and units conversion.
+ */
+#define USECOND_PER_SECOND 1000000
+#define BYTES_TO_KBYTES(A) (A / 1024)
+#define KBYTES_TO_BYTES(A) (A * 1024)
 
 struct peer {
     int             socketfd;   /* Socket file descriptor */
@@ -79,6 +94,9 @@ struct peer {
                                  * data in buffer */
 };
 
+/*
+ * DNS record
+ */
 struct record {
     char            valid;      /* 1 if valid, 0 if invalid */
     char            hostname[RECORD_HOSTNAME_LENGTH + 1];
@@ -119,9 +137,7 @@ sigHandler(int sig)
          */
         log_info("Catch SIGINT");
         kill(0, SIGTERM);
-    }
-
-    if (sig == SIGTERM) {
+    } else if (sig == SIGTERM) {
         log_info("Catch SIGTERM");
         sleep(2);
         shm_unlink(SHM_NAME);
@@ -170,7 +186,6 @@ send_error(int sfd, const int code)
         head = RESPONSE_400_HEAD;
         break;
     }
-
 
 #ifdef __OPENSSL_SUPPORT__
     BIO_puts(io, head);
@@ -300,7 +315,7 @@ make_socket(const char *name, const char *port)
 }
 
 void
-docleaner(void)
+dnscleaner(void)
 {
     int             ttl;
     char           *p;
@@ -335,18 +350,28 @@ docleaner(void)
     }
 }
 
-
+/*
+ * Gets the rate specified in the configuration file.
+ * Returns -1 if not found.
+ * Returns the best (longest) matches if there are multiple matches.
+ */
 int
 get_rate(const char *hostname)
 {
     struct config_sect *p;
-    size_t          best_match;
     struct config_token *token;
+    size_t          best_match;
     int             rate;
 
     p = conf;
     best_match = 0;
     rate = -1;
+
+    /*
+     * The idea is, if the "hostname" matches "edu.au" and "anu.edu.au", the
+     * later one will be used regardless of their order in the configuration
+     * file.
+     */
     while (p != NULL) {
         if (strcasecmp(p->name, "rates") == 0) {
             token = p->tokens;
@@ -379,6 +404,18 @@ proxy(int sfd)
     struct peer    *server = NULL;
 
     /*
+     * Hostname and port from Host filed
+     */
+    char           *hostname = NULL;
+    char           *port = NULL;
+
+    /*
+     * Hostname and port from Request-line.
+     */
+    char           *request_hostname = NULL;
+    char           *request_port = NULL;
+
+    /*
      * Variables for select()
      */
     struct timeval  tv;
@@ -388,18 +425,6 @@ proxy(int sfd)
 
     int             byte_count,
                     line_count;
-
-    /*
-     * Hostname and port from Host filed
-     */
-    char           *hostname = NULL,
-        *port = NULL;
-
-    /*
-     * Hostname and port from Request-line.
-     */
-    char           *request_hostname = NULL,
-        *request_port = NULL;
 
     /*
      * Rate-limiting related variables
@@ -418,9 +443,13 @@ proxy(int sfd)
      */
     int             content_flag;
 
+#ifdef __OUT_OF_MIND__
+    send_error(sfd, 400);
+#endif
+
 #ifdef __OPENSSL_SUPPORT__
-    BIO            *io = NULL,
-        *ssl_bio = NULL;
+    BIO            *io,
+                   *ssl_bio;
 
     io = BIO_new(BIO_f_buffer());
     ssl_bio = BIO_new(BIO_f_ssl());
@@ -439,7 +468,7 @@ proxy(int sfd)
     memset(client, 0, sizeof(*client));
 
     client->socketfd = sfd;
-    client->buffer = malloc(BUFFER_SIZE);
+    client->buffer = malloc(PEER_BUFFER_SIZE);
     check_mem(client->buffer);
     client->bytes_read = 0;
 
@@ -448,7 +477,7 @@ proxy(int sfd)
     memset(server, 0, sizeof(*server));
 
     server->socketfd = -1;
-    server->buffer = malloc(BUFFER_SIZE);
+    server->buffer = malloc(PEER_BUFFER_SIZE);
     check_mem(server->buffer);
     server->bytes_read = 0;
 
@@ -901,6 +930,27 @@ proxy(int sfd)
     _exit(EXIT_FAILURE);
 }
 
+void
+usage(int error)
+{
+    FILE           *stream;
+    if (error == 1)
+        stream = stderr;
+    else
+        stream = stdout;
+    fprintf(stream,
+            "NAME\n"
+            "\twebproxy - A Rate-limiting HTTP Proxy and Filter\n"
+            "\n"
+            "SYNOPSIS\n"
+            "\twebproxy -h\n"
+            "\twebproxy [-f FILE]\n"
+            "\n"
+            "OPTIONS\n"
+            "\t-h\tshow this message.\n"
+            "\t-f FILE\tspecify the configuration file.\n");
+}
+
 int
 main(int argc, char *argv[])
 {
@@ -912,6 +962,7 @@ main(int argc, char *argv[])
     int             optval;
     int             fd = -1;
     char           *listen_port;
+    char           *ptr;
 
 #ifdef __OPENSSL_SUPPORT__
     BIO            *sbio;
@@ -922,9 +973,26 @@ main(int argc, char *argv[])
     load_dh_params(ctx, DHFILE);
 #endif
 
+    /*
+     * Preventsthe transformation of children into zombies.
+     */
+    signal(SIGCHLD, SIG_IGN);
+    signal(SIGINT, sigHandler);
+    signal(SIGTERM, sigHandler);
+
     switch (argc) {
     case 1:
+        log_info
+            ("No configuration file specified, defaults values will be used.");
         break;
+    case 2:
+        if (strcmp(argv[1], "-h") == 0) {
+            usage(0);
+            return EXIT_SUCCESS;
+        } else {
+            usage(1);
+            return EXIT_FAILURE;
+        }
     case 3:
         if (strcmp(argv[1], "-f") == 0) {
 
@@ -932,12 +1000,10 @@ main(int argc, char *argv[])
             if (conf == NULL) {
                 log_warn("Cannot find configuration file.");
             }
-            /*
-             * config_dump(conf);
-             */
             break;
         }
     default:
+        usage(1);
         return EXIT_FAILURE;
     }
 
@@ -952,8 +1018,6 @@ main(int argc, char *argv[])
         mmap(NULL, cache_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
     check(addr != MAP_FAILED, "Cannot map?!");
 
-    *((struct record **) addr) = NULL;
-
     sem =
         sem_open(SEM_NAME, O_CREAT | O_EXCL | O_RDWR, S_IRUSR | S_IWUSR,
                  1);
@@ -962,23 +1026,27 @@ main(int argc, char *argv[])
 
     setbuf(stdout, NULL);
 
-    signal(SIGCHLD, SIG_IGN);
-    signal(SIGINT, sigHandler);
-    signal(SIGTERM, sigHandler);
-
     memset(&hints, 0, sizeof(hints));
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
     hints.ai_flags = AI_PASSIVE;
 
-    listen_port = config_get_value(conf, "default", "proxy_port", 1);
-    if (listen_port == NULL)
+    ptr = config_get_value(conf, "default", "proxy_port", 1);
+    if (ptr == NULL)
         listen_port = "8080";
+    else
+        listen_port = ptr;
+
+    ptr = config_get_value(conf, "default", "debug_level", 1);
+    if (ptr == NULL)
+        debug_level = 2;
+    else
+        debug_level = (int) strtol(ptr, (char **) NULL, 10);
+
     check(getaddrinfo(NULL, listen_port, &hints, &servinfo) == 0,
           "cannot getaddrinfo");
 
     optval = 1;
-
     for (p = servinfo; p != NULL; p = p->ai_next) {
         sfd = socket(servinfo->ai_family, servinfo->ai_socktype,
                      servinfo->ai_protocol);
@@ -1000,15 +1068,17 @@ main(int argc, char *argv[])
         break;
     }
 
-    check(p != NULL, "Failed to bind\n");
+    log_info("The proxy is listening at port: %s", listen_port);
 
     freeaddrinfo(servinfo);
+
+    check(p != NULL, "Failed to bind\n");
 
     check(listen(sfd, 10) != -1, "Cannot listen");
 
     switch (fork()) {
     case 0:
-        docleaner();
+        dnscleaner();
         _exit(EXIT_SUCCESS);
     case -1:
         log_err("Cannot fork()");
